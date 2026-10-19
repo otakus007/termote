@@ -606,12 +606,13 @@ protects for a user, and what it does not: [`security-model.md`](security-model.
   staged old side, read by one `git cat-file --batch` (no filters, not `heavy`: no status/diff
   slot, no backoff; a name with `\r` or `\n` → 400, missing → 404 `no_version`, time out → 503). The type
   comes from the first bytes through `imageTypeOf` (shared with uploads: PNG/JPEG/GIF/WebP), plus
-  SVG only for a `.svg` path whose first element is `<svg`; 10 MiB (413 `too_large`), 40 MP
+  SVG only for a `.svg` path whose first element is `<svg`, and PDF (`application/pdf`) only for a
+  `.pdf` path whose first bytes start with `%PDF-`; 10 MiB (413 `too_large`), 40 MP
   (PNG/JPEG header, a GIF's largest frame with its offset, a WebP's first chunk; 413
   `too_many_pixels`), else 415 `not_image`, a Git LFS pointer 415
   `lfs_pointer`, a sensitive name without `reveal=1` 403 `sensitive`. 4 at a time server-wide
   (429 `busy`), 2-minute write deadline, `Cross-Origin-Resource-Policy: same-origin`,
-  `Cache-Control: no-store`; an SVG also gets a second CSP
+  `Cache-Control: no-store`; an SVG or PDF also gets a second CSP
   (`sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:`) and
   `Content-Disposition: attachment`
 - **`<details>` in a previewed Markdown file** (`detailsBlocks` in
@@ -931,7 +932,24 @@ protects for a user, and what it does not: [`security-model.md`](security-model.
   worker answers version 2 (`notify-sw.js` has the push handler), and repeats the subscribe POST
   on load, every 10 minutes while shown and when shown again. Log out deletes this device's subscription first.
   The CSP is unchanged: the server, not the page, talks to push services. The container opens
-  `/home/termote/.local/state` 1777 like `.cache`/`.config`
+  `/home/termote/.local/state` 1777 like `.cache`/`.config`.
+  `/api/mux/notify/config` (`GET`/`PUT`/`POST`), `/api/mux/notify/mute` (`POST`),
+  `/api/mux/notify/telegram` (`PUT`/`POST`/`DELETE`) and `/api/mux/notify/telegram/test` (`POST`) all
+  require `hostGuard` and `requireWriteRole` (a view-only client gets 403 `view_only` on both reads
+  and writes), with `writeGuard` and the 8 KB body limit on writes. `notify-config.json` and
+  `telegram.json` live in `<stateDir>/push` (0600, atomic `.part` write + rename, bound to `gen`
+  so `start --fresh` or a password change clears Telegram credentials and resets config).
+  `botToken` (`^[A-Za-z0-9:_-]{3,256}$`) and `chatId` (`^[A-Za-z0-9_@-]{1,128}$`) are write-only:
+  responses return only `{configured, enabled, chatIdTail}` (last 4 characters), and transport errors
+  strip `bot<token>` before logging. Outbound Telegram messages use a dedicated `http.Client`
+  (`Proxy: nil`, no redirects, 10 s timeout, `DialContext` enforcing `pushDialControl` on resolved IPs)
+  pinned to `https://api.telegram.org/bot<token>/sendMessage`, with C0/C1, bidi and zero-width
+  characters stripped (`cleanNotifyText`) and 429 `Retry-After` backoff (capped at 1 h). `publicUrl`
+  must be `http://` or `https://` with no userinfo, query or fragment (at most 512 bytes), and
+  Telegram deep links are omitted when `publicUrl` is unset or points to loopback (`localhost`,
+  `127.0.0.1`, `::1`). Foreground presence (`snapshot?viewing=<paneId>` validated by `validTarget`,
+  or an open `/api/mux/stream` WebSocket) holds `blocked` transitions until the pane is no longer viewed
+  and drops `done` transitions while viewed
 - Exclude sensitive dirs (.ssh, .gnupg, .aws, .config/gcloud) from container volume mounts
   (warned at `container up`)
 - Serve mode uses constant-time comparison for password verification
@@ -1062,7 +1080,7 @@ protects for a user, and what it does not: [`security-model.md`](security-model.
   plus the `sha256` of the inline theme script in the served `index.html` (hashed at startup,
   so a changed `TERMOTE_PWA_DIR` page needs a restart), `style-src 'self' 'unsafe-inline'`,
   `img-src 'self' data: blob:` (`blob:`: images the PWA read from `files/raw`; an SVG is shown as a `data:` URL, never a `blob:` one, which opened in a tab would be a document of this origin), `connect-src 'self'` + `ws://`/`wss://` of the request's `Host` (a
-  name or IPv4) + `https://api.github.com`, `worker-src`/`manifest-src 'self'`,
+  name or IPv4) + `https://api.github.com`, `worker-src`/`manifest-src 'self'`, `frame-src 'self' blob:`,
   `object-src 'none'`, `base-uri`/`form-action 'self'`, `frame-ancestors 'none'`; plus
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`.
   `isolationHeaders`, wrapped outside `hostGuard` so its 403 carries them too, adds
@@ -1116,3 +1134,103 @@ protects for a user, and what it does not: [`security-model.md`](security-model.
   per-install `secret` file (0600) on Unix, DPAPI on Windows; the config file is also chmod
   600. The password is never written to the systemd unit, launchd plist, Scheduled Task or any
   process command line; print it again with `termote show-password`.
+- **Agent harnesses, beacons, and `opencode`/`pi` transcripts** (`server/agent_harnesses.go`,
+  `server/agent_opencode.go`, `server/agent_pi.go`, `server/cli_hooks.go`): process-tree
+  detection (`otherHarnessProcOf`, skipping `rootPID <= 1`) runs first and merges lifecycle beacons
+  in `<stateDir>/beacons/<paneKey>.json` without clobbering a verified Claude session UUID or
+  `ClaudeDir`, supporting `claude`, `codex`, `opencode`, `pi`, `omp`, `gemini`, `antigravity`,
+  `cursor`, `grok`, `hermes`, and `openclaw`. `<stateDir>/beacons` (included in `FilesDenyDirs` and
+  `FilesWriteDenyDirs`) is checked by `os.Lstat`, `privateUploadFile` (`0700`) and
+  `fileOwnedByServer`, and opened through `os.OpenRoot` with `openNonblock`; only regular files
+  matching `^[A-Za-z0-9_.:%-]{1,64}\.json$`, at most 4 KB, owned by the server user, updated within
+  10 minutes (`beaconMaxAge`), and naming a live PID (`beaconPIDAlive`) are accepted. `opencodeJournal`
+  and `piJournal` open `baseDir` via `os.OpenRoot` first, confine any explicit `s.Rollout` inside
+  `baseDir` (rejecting `..` or outside paths and requiring `.json`/`.jsonl`), enforce `opencodeSessionIDRe`
+  (`^[A-Za-z0-9_-]{1,128}$`) when scanning, open session files with `openNonblock`, cap lines with
+  `longLineClipper`, strip ANSI escapes, and redact sensitive tool inputs (`claudeInputSensitive`).
+  `termote hooks install [--uninstall]` writes `<stateDir>/beacons/termote-beacon.sh` (`0700`) and
+  merges hook entries into `~/.claude/settings.json` (`0600`, `.bak` backup) without shell-expanding
+  untrusted pane keys.
+- **Prompt-cache warmth and local acknowledge** (`server/agent_cache.go`,
+  `POST /api/mux/panes/{id}/agent/ack` in `server/agent.go` and `server/agent_activity.go`):
+  `computeAgentCache` derives `{state, lastTouchAt, ttlSec, bustReason}` from transcript token
+  metadata and bust events (`/model`, `/effort`, `/compact`, `summary` rows) without reading any
+  extra files; `cacheWarnTracker` fires at most one `cache-cold` alert per warm cycle (`lastTouchAt`)
+  when remaining TTL reaches `cacheWarnSec` (60 s). `POST /api/mux/panes/{id}/agent/ack` is guarded
+  by `writeGuard` and `requireWriteRole` (view-only gets 403 `view_only`) and records a local
+  acknowledgment in `activityTracker.acked` that folds a `done` pane to `idle` in snapshots and
+  overview without invoking `herdr` `agent.focus`.
+- **Custom launchers, option chips, folders, and `sendNow`** (`GET`/`POST`/`PUT /api/mux/launchers`
+  in `server/launchers_store.go`, `server/agent_start.go`, `server/agent_input.go`):
+  `<stateDir>/launchers` (`0700`, `checkPrivateDir`, included in `FilesDenyDirs` and
+  `FilesWriteDenyDirs`) stores `launchers.json` (max 50 recipes), `commands-recent.json` (max 20),
+  and `folders.json` (max 50 favourites, 20 recents) via atomic `0600` `.part` writes.
+  `GET /api/mux/launchers` enforces `crossSiteRejection` and omits `folders` completely when
+  `isViewOnly(r)` is true so host directory paths are never disclosed to view-only clients;
+  `POST`/`PUT /api/mux/launchers` require `writeGuard` and `requireWriteRole`. Option chip flags
+  must match `^--?[a-zA-Z0-9][a-zA-Z0-9=_.:/-]{0,63}$` (`validLaunchOptionFlag`, no whitespace or
+  control characters), and starting any harness or recipe in `agent_start.go` requires `writeGuard`,
+  `requireWriteRole`, and a verified idle shell (`paneIdleShell`). `sendNow: true` on
+  `POST /api/mux/panes/{id}/agent/message` is accepted only for `claude` and `codex` under the pane
+  lock and `requireWriteRole`, sending the immediate flush keystroke after pasting the message.
+- **Sandboxed HTML/PDF preview and `tmk1:` share code validation** (`pwa/src/components/file-viewer.tsx`,
+  `pwa/src/utils/keys-layout.ts`, `server/files_raw.go`): `.html`/`.htm` files are rendered as syntax-highlighted
+  source by default, and when HTML preview is enabled (`htmlPreview` setting + per-file Preview toggle)
+  they render inside `<iframe sandbox="" referrerPolicy="no-referrer" srcdoc={text} />` (`allow-same-origin`
+  and `allow-scripts` are never set, so the document runs in an opaque origin with scripts, forms, popups,
+  and top navigation disabled). `.pdf` files are served by `/api/mux/panes/{id}/files/raw` only after
+  verifying the `%PDF-` magic header, size cap (`10 MiB`), and restrictive `svgPolicy` CSP, and rendered
+  via a revoked-on-unmount `blob:` URL (`useImageBlob`). Custom 2D keys board share codes (`tmk1:<base64url>`)
+  are validated strictly client-side (`decodeShareCode` / `validateKeysLayout`: max 16 KiB raw payload,
+  `version: 1`, 1–28 cells, `colSpan` 1–7, `rowSpan` 1–2, 1–4 steps per key, max 64 chars per step,
+  printable/ANSI-safe keystrokes only) and stored solely in `localStorage`.
+- **Host resource monitoring (`server/machine_*.go`, `/api/mux/machine*`)**: `machineCollector`
+  samples CPU %, usable Memory % (`MemTotal - MemAvailable` on Linux so reclaimable page cache is
+  excluded), 1m/5m/15m Load Average, Physical Network RX/TX rates (skipping virtual interfaces such
+  as `lo`, `veth*`, `docker*`, `br-*`, `utun*`, `tailscale*`, `wg*`, `tun*`, `tap*`), and up to 4
+  fullest physical mounts (skipping pseudo and network filesystem types such as `tmpfs`, `devtmpfs`,
+  `squashfs`, `overlay`, `proc`, `sysfs`, `cgroup*`, `nfs*`, `cifs`, `smb*`, `fuse*`) every 1 minute
+  into an in-memory 1440-point (24 h) ring buffer. On Linux (`machine_stats_linux.go`), all reads use
+  `os.Open` with a 64 KB `io.LimitReader` on `/proc/*` and `syscall.Statfs` with zero external
+  binaries; on macOS and Windows, `CGO_ENABLED=0` syscall collectors are used. History is persisted
+  atomically to `<stateDir>/machine/machine-history.json` (`0600` inside `0700` `<stateDir>/machine`,
+  verified via `checkPrivateDir`, included in `FilesDenyDirs` and `FilesWriteDenyDirs`) every 5 minutes
+  and on shutdown via `writeStateFile`. `GET /api/mux/machine?range=1h|24h` enforces `requireMethod(GET)`
+  and `crossSiteRejection` and serves exclusively from memory (zero syscalls in the HTTP request path);
+  for `view`-only clients (`viewHidesMachineMounts(r)` / `!hasWriteRole(r)`), non-root disk mount labels
+  in `current.disks` and `samples[*].disks` are redacted to generic indices (`disk-1`, `disk-2`, ...) so
+  custom mount paths under `/home/...` or `/Users/...` are never disclosed. `POST`/`PUT /api/mux/machine/alerts`
+  are guarded by `writeGuard`, `requireWriteRole` (view-only gets 403 `view_only`), and the 8 KB body
+  limit, validating at most 16 rules (`metric` in `cpu|memory|disk`, `50 <= thresholdPct <= 99`,
+  `5 <= durationMin <= 120`) and persisting to `<stateDir>/machine/machine-alerts.json` (`0600`);
+  sustained high-load alerts fire at most once via `EmitExternal(pushEvent{Kind: "machine-load"})`
+  when all trailing `durationMin` samples meet `thresholdPct`, and reset only after usage drops below
+  `thresholdPct - 5` (hysteresis).
+- **Multi-machine crew federation and standby deputy failover (`server/crew_*.go`, `/crew/v1/*`, `/api/mux/crew*`, `termote crew`)**:
+  Each node generates a self-signed ECDSA P-256 TLS 1.3 certificate (`crew-cert.pem`) and PKCS#8 private key
+  (`crew-key.pem`, `0600`) inside `<stateDir>/crew` (`0700`, verified via `checkPrivateDir`, included in `FilesDenyDirs`
+  and `FilesWriteDenyDirs`), identified by its lowercase hex SHA-256 DER fingerprint (`certFingerprintHex`). Crew
+  roster state (`crew.json`, `0600`, capped at `maxCrewMembers = 16`) pins peer certificates (TOFU) and authorized
+  controller certificates (`lead` and `deputy`). In `runServer`, `tlsOrHTTPListener` wraps the TCP listener, peeking the
+  first byte (`0x16` TLS ClientHello, 2 s deadline) to serve TLS 1.3 mTLS (`crew.Store().PeerTLSConfig()`) to Crew
+  peers while serving plain HTTP to front-door browser and CLI connections on the same port. All `/crew/v1/*` endpoints
+  require TLS 1.3 (`r.TLS.Version >= tls.VersionTLS13`); `/crew/v1/join` verifies a single-use invite token
+  (`tmcrew1:<base64url>`, 10-minute TTL, 32-byte CSPRNG secret, `consumed=true` persisted under lock before completion)
+  in constant time and pins the peer certificate, while all other `/crew/v1/*` routes require `requireCrewPeerAuth`:
+  mutual TLS 1.3 with a pinned controller/member certificate (`constantTimeHexEqual`) plus a valid ECDSA P-256 SHA-256
+  signature (`X-Crew-Timestamp` unix-ms within `±60s` and strictly increasing per sender via `checkAndRecordTimestamp`,
+  `X-Crew-Signature` over `METHOD\nPATH?QUERY\nTIMESTAMP\nSHA256(BODY)`, `X-Crew-Sender-Id`, and `X-Crew-Auth-HMAC` when
+  a shared secret is configured), or a Lead-signed `DeputyWarrant` (`X-Crew-Warrant`). All `/api/mux/crew/*` routes
+  (`GET /api/mux/crew/status` and `POST /api/mux/crew/{invite,join,add,remove,deputy,promote}`) require `requireWriteRole`
+  (view-only gets 403 `view_only`). When the Lead proxies PWA HTTP/WebSocket requests to a member (`c:<memberId>/<paneId>`,
+  with `validCrewMemberID` `[a-zA-Z0-9_-]{1,32}` validation, `crossSiteRejection` on read requests, `requireWriteRole` on
+  writes, `maxJSONBody` on `/api/mux/tabs`, `Content-Type` preservation, and a `16 MiB` proxy body cap), it forwards the
+  caller's role in `X-Termote-Client-Role: view|full`; member `/crew/v1/proxy/*` and `/crew/v1/stream` handlers default
+  to `view` unless `full` is explicitly asserted, injecting a synthetic `tokenView` session into the request context so
+  every downstream `requireWriteRole`, `stripSnapshotDirs`, and `viewHidesMachineMounts` check on the member node enforces
+  view-only restrictions identically to local requests. `AugmentSnapshot` deep-clones cached member groups (`cloneCrewGroup`)
+  and `GET /api/mux/snapshot` runs `stripSnapshotDirs` after augmentation so `view`-only callers never see local or federated
+  `process.cwd`. `AugmentOverview` and `buildLocalOverview` support single-pane `?pane=c:<memberId>/<origPane>` lookups.
+  Standby Deputy failover (`DeputyWarrant` signed by the Lead's ECDSA P-256 key and replicated via `POST /crew/v1/warrant`)
+  allows the designated deputy to promote itself (`POST /api/mux/crew/promote` / `termote crew promote`) and poll members
+  using the Lead-signed warrant (`verifyDeputyWarrant`).
