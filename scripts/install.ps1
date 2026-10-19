@@ -20,7 +20,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 # Windows PowerShell 5.1 may default to TLS 1.0, which GitHub refuses.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-$Repo = 'lamngockhuong/termote'
+$Repo = 'otakus007/termote'
 $Dir = Join-Path $env:LOCALAPPDATA 'termote'
 
 function Stop-Install([string]$Message) {

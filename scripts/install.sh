@@ -16,7 +16,7 @@
 # at it. GH_TOKEN (or GITHUB_TOKEN) only raises the GitHub API rate limit.
 set -eu
 
-REPO="lamngockhuong/termote"
+REPO="otakus007/termote"
 DIR="${XDG_DATA_HOME:-$HOME/.local/share}/termote"
 BIN_DIR="$HOME/.local/bin"
 
