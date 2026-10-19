@@ -94,7 +94,7 @@ func (a *agentAPI) handleCommands(w http.ResponseWriter, r *http.Request) {
 		})
 	default:
 		// Only the dirs of an agent read here are ever opened.
-		res = commandsResponse{Commands: []agentCommand{}}
+		res = commandsResponse{Commands: harnessSlashCommands(s.Agent)}
 	}
 	jsonOK(w, res)
 }

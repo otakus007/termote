@@ -73,19 +73,24 @@ type usageWindow struct {
 // overviewPane is one card's data. Unavailable names what could not be read
 // this time ("transcript", "changes"); the client shows it as pending.
 type overviewPane struct {
-	PaneID           string         `json:"paneId"`
-	Key              string         `json:"key"`
-	LastText         string         `json:"lastText,omitempty"`
-	LastTS           string         `json:"lastTs,omitempty"`
-	Branch           string         `json:"branch,omitempty"`
-	Changed          *int           `json:"changed,omitempty"`
-	ChangedTruncated bool           `json:"changedTruncated,omitempty"`
-	Usage            *overviewUsage `json:"usage,omitempty"`
-	AccountKey       string         `json:"accountKey,omitempty"`
-	Unavailable      []string       `json:"unavailable,omitempty"`
+	PaneID           string          `json:"paneId"`
+	Key              string          `json:"key"`
+	MachineID        string          `json:"machineId,omitempty"`
+	MachineName      string          `json:"machineName,omitempty"`
+	LastText         string          `json:"lastText,omitempty"`
+	LastTS           string          `json:"lastTs,omitempty"`
+	Branch           string          `json:"branch,omitempty"`
+	Changed          *int            `json:"changed,omitempty"`
+	ChangedTruncated bool            `json:"changedTruncated,omitempty"`
+	Usage            *overviewUsage  `json:"usage,omitempty"`
+	Cache            *agentCacheInfo `json:"cache,omitempty"`
+	AccountKey       string          `json:"accountKey,omitempty"`
+	Unavailable      []string        `json:"unavailable,omitempty"`
 	// change: the pane's directory as last read, for the role check of
 	// each request (a view-only client never sees a home dir's changes).
-	change *overviewChange
+	change  *overviewChange
+	groupID string
+	tabID   string
 }
 
 type overviewResponse struct {
@@ -136,6 +141,9 @@ func (a *agentAPI) handleOverview(w http.ResponseWriter, r *http.Request) {
 		}
 		res.Panes[i] = p
 	}
+	if a.crew != nil {
+		res = a.crew.AugmentOverview(r, res)
+	}
 	jsonOK(w, res)
 }
 
@@ -166,7 +174,7 @@ func (a *agentAPI) readOverview(only string) overviewRead {
 		for _, t := range g.Tabs {
 			for _, p := range t.Panes {
 				if p.Agent != nil && len(panes) < overviewMaxPanes && (only == "" || p.ID == only) {
-					panes = append(panes, overviewPane{PaneID: p.ID, Key: activityKey(t, p)})
+					panes = append(panes, overviewPane{PaneID: p.ID, Key: activityKey(t, p), groupID: g.ID, tabID: t.ID})
 				}
 			}
 		}
@@ -221,7 +229,14 @@ func (a *agentAPI) readOverview(only string) overviewRead {
 			p := &panes[r.i]
 			switch {
 			case r.err == nil:
-				p.LastText, p.LastTS, p.Usage = r.sum.lastText, r.sum.lastTS, r.sum.usage
+				p.LastText, p.LastTS, p.Usage, p.Cache = r.sum.lastText, r.sum.lastTS, r.sum.usage, r.sum.cache
+				if p.Cache != nil {
+					emit := a.emitPush
+					if emit == nil {
+						emit = a.activity.emitPushEvent
+					}
+					a.cacheWarn.check(p.Key, pushEvent{Kind: "cache-cold", GroupID: p.groupID, TabID: p.tabID, PaneID: p.PaneID}, p.Cache, time.Now(), emit)
+				}
 				if r.sum.limits != nil {
 					p.AccountKey = accountKey(r.sum.codexHome)
 					limits[r.i] = r.sum.limits
@@ -336,6 +351,7 @@ type transcriptSummary struct {
 	lastText  string
 	lastTS    string
 	usage     *overviewUsage
+	cache     *agentCacheInfo
 	limits    *codexLimits
 	codexHome string
 }
@@ -376,6 +392,9 @@ func summarizeTranscript(entries []TranscriptEntry, s AgentSession) transcriptSu
 				}
 			}
 		}
+	}
+	if len(entries) > 0 {
+		sum.cache = computeAgentCache(entries, time.Now())
 	}
 	return sum
 }

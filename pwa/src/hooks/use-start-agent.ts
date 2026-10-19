@@ -7,6 +7,7 @@ import {
   agentStartState,
   RequestError,
   type StartAgentKind,
+  type StartAgentOptionsPayload,
   startAgent,
 } from './use-mux-api'
 
@@ -60,7 +61,11 @@ const keyOf = (
 export interface AgentStartControl {
   // Starts made from this page, by pane id
   starts: Readonly<Record<string, StartRecord>>
-  start: (paneId: string, kind: StartAgentKind) => void
+  start: (
+    paneId: string,
+    kind: StartAgentKind,
+    opts?: StartAgentOptionsPayload,
+  ) => void
 }
 
 export interface StartAgentOptions {
@@ -119,10 +124,17 @@ export function useStartAgent(opts: StartAgentOptions): AgentStartControl {
   }, [])
 
   const start = useCallback(
-    (paneId: string, kind: StartAgentKind) => {
+    (
+      paneId: string,
+      kind: StartAgentKind,
+      startOpts?: StartAgentOptionsPayload,
+    ) => {
       const since = Date.now()
       put(paneId, { kind, phase: 'sending', since })
-      startAgent(paneId, kind).then(
+      const req = startOpts
+        ? startAgent(paneId, kind, startOpts)
+        : startAgent(paneId, kind)
+      req.then(
         () => put(paneId, { kind, phase: 'starting', since }),
         (err) =>
           put(

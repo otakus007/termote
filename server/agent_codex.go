@@ -208,7 +208,11 @@ type codexTokenCountRow struct {
 		Type string `json:"type"`
 		Info *struct {
 			LastTokenUsage *struct {
-				TotalTokens int64 `json:"total_tokens"`
+				InputTokens           int64 `json:"input_tokens"`
+				CachedInputTokens     int64 `json:"cached_input_tokens"`
+				CachedTokens          int64 `json:"cached_tokens"`
+				CacheWriteInputTokens int64 `json:"cache_write_input_tokens"`
+				TotalTokens           int64 `json:"total_tokens"`
 			} `json:"last_token_usage"`
 			ModelContextWindow int64 `json:"model_context_window"`
 		} `json:"info"`
@@ -248,7 +252,14 @@ func addCodexTokenCount(entries []TranscriptEntry, line []byte) {
 		u = *old
 	}
 	if in := row.Payload.Info; in != nil && in.LastTokenUsage != nil && in.ModelContextWindow > 0 {
-		u.contextTokens, u.window, u.noContext = in.LastTokenUsage.TotalTokens, in.ModelContextWindow, false
+		lu := in.LastTokenUsage
+		u.contextTokens, u.window, u.noContext = lu.TotalTokens, in.ModelContextWindow, false
+		u.inputTokens = max(0, lu.InputTokens)
+		u.cacheReadTokens = max(0, lu.CachedInputTokens, lu.CachedTokens)
+		u.cacheCreationTokens = max(0, lu.CacheWriteInputTokens)
+		if entries[i].TS == "" && row.Timestamp != "" {
+			entries[i].TS = row.Timestamp
+		}
 	}
 	if l := codexLimitsOf(row); l != nil {
 		u.limits = l

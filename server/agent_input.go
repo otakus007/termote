@@ -372,9 +372,10 @@ func (a *agentAPI) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Text   string   `json:"text"`
-		Cursor string   `json:"cursor"`
-		Images []string `json:"images"`
+		Text    string   `json:"text"`
+		Cursor  string   `json:"cursor"`
+		Images  []string `json:"images"`
+		SendNow bool     `json:"sendNow"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, agentMessageBody)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -432,7 +433,7 @@ func (a *agentAPI) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), budget)
 	defer cancel()
-	if err := a.sendMessage(ctx, wr, paneID, c.Session, text, paths); err != nil {
+	if err := a.sendMessageWith(ctx, wr, paneID, c.Session, text, paths, body.SendNow); err != nil {
 		a.writeFailure(w, err)
 		return
 	}
@@ -482,6 +483,10 @@ func (a *agentAPI) imagePaths(ids []string) ([]string, error) {
 // sendMessage pastes the images, each path on its own, then text into an
 // empty input box of session and submits it.
 func (a *agentAPI) sendMessage(ctx context.Context, wr agentWriter, paneID, session, text string, paths []string) error {
+	return a.sendMessageWith(ctx, wr, paneID, session, text, paths, false)
+}
+
+func (a *agentAPI) sendMessageWith(ctx context.Context, wr agentWriter, paneID, session, text string, paths []string, sendNow bool) error {
 	s, err := sessionNow(ctx, wr, paneID)
 	if err != nil {
 		return err
@@ -489,9 +494,9 @@ func (a *agentAPI) sendMessage(ctx context.Context, wr agentWriter, paneID, sess
 	if s.ID != session {
 		return errSessionChanged
 	}
-	// The agent queues a message sent while it works; a message the user
-	// cannot see land is not sent.
-	if err := inputReady(s); err != nil {
+	// The agent queues a message sent while it works; unless sendNow is
+	// explicitly requested, a message the user cannot see land is not sent.
+	if err := inputReadyFor(s, sendNow); err != nil {
 		return err
 	}
 	screen, err := wr.Capture(ctx, s.Target)
@@ -514,7 +519,7 @@ func (a *agentAPI) sendMessage(ctx context.Context, wr agentWriter, paneID, sess
 		if !sameAgent(now, s) {
 			return errSessionChanged
 		}
-		if err := inputReady(now); err != nil {
+		if err := inputReadyFor(now, sendNow); err != nil {
 			return err
 		}
 	}
@@ -531,7 +536,7 @@ func (a *agentAPI) sendMessage(ctx context.Context, wr agentWriter, paneID, sess
 	// The same idle agent before every paste that follows an image.
 	stillReady := func() bool {
 		now, err := sessionNow(ctx, wr, paneID)
-		return err == nil && sameAgent(now, s) && inputReady(now) == nil
+		return err == nil && sameAgent(now, s) && inputReadyFor(now, sendNow) == nil
 	}
 	// An image path becomes the agent's token only when pasted alone, so
 	// each goes in its own paste, confirmed before the next.
@@ -568,7 +573,7 @@ func (a *agentAPI) sendMessage(ctx context.Context, wr agentWriter, paneID, sess
 		if !sameAgent(now, s) {
 			return errSessionChanged
 		}
-		if err := inputReady(now); err != nil {
+		if err := inputReadyFor(now, sendNow); err != nil {
 			return err
 		}
 	}
@@ -601,9 +606,9 @@ func (a *agentAPI) sendMessage(ctx context.Context, wr agentWriter, paneID, sess
 		}
 		return notShown
 	}
-	// The same process and session, still idle, right before the key that
+	// The same process and session, still ready, right before the key that
 	// submits; otherwise the text stays in the box for the user to see.
-	if now, err := sessionNow(ctx, wr, paneID); err != nil || !sameAgent(now, s) || inputReady(now) != nil {
+	if now, err := sessionNow(ctx, wr, paneID); err != nil || !sameAgent(now, s) || inputReadyFor(now, sendNow) != nil {
 		return fail(http.StatusBadGateway, "delivered_not_submitted", "the text is in the input box but was not submitted")
 	}
 	if err := wr.SendKeySequence(ctx, s.Target, []string{"Enter"}); err != nil {
@@ -669,10 +674,14 @@ func ownDraft(draft string, k int, pasted string) bool {
 // inputReady: the agent waits for a message and the pane passes keys to it.
 // A message sent while it works is queued, out of the user's sight.
 func inputReady(s AgentSession) error {
+	return inputReadyFor(s, false)
+}
+
+func inputReadyFor(s AgentSession, sendNow bool) error {
 	if s.InMode {
 		return fail(http.StatusConflict, "input_not_ready", "the pane is in copy mode")
 	}
-	if s.Status != "idle" && s.Status != "done" {
+	if s.Status != "idle" && s.Status != "done" && !(sendNow && s.Status == "working") {
 		return fail(http.StatusConflict, "input_not_ready", "the agent is "+agentStatusWord(s.Status))
 	}
 	return nil

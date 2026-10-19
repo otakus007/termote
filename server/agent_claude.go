@@ -131,6 +131,9 @@ type claudeUsage struct {
 	InputTokens              int64 `json:"input_tokens"`
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheCreation            *struct {
+		Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
 }
 
 // claudeToolUseResult is the file path a toolUseResult names: filePath (an
@@ -381,14 +384,23 @@ func parseClaudeRow(line []byte, off int64) (TranscriptEntry, bool) {
 	}
 	if row.IsCompactSummary {
 		e.Role = "summary"
+		e.bustReason = "compaction"
 	}
 	// Claude Code writes an error or an interruption as an assistant row of
 	// model <synthetic> with zero usage: it filled no context.
 	if u := row.Message.Usage; u != nil && row.Type == "assistant" && row.Message.Model != "<synthetic>" {
+		var eph1h int64
+		if u.CacheCreation != nil && u.CacheCreation.Ephemeral1hInputTokens > 0 {
+			eph1h = u.CacheCreation.Ephemeral1hInputTokens
+		}
 		// The whole prompt of the request: what fills the context.
 		e.usage = &entryUsage{
-			contextTokens: u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens,
-			model:         row.Message.Model,
+			contextTokens:       u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens,
+			model:               row.Message.Model,
+			inputTokens:         max(0, u.InputTokens),
+			cacheReadTokens:     max(0, u.CacheReadInputTokens),
+			cacheCreationTokens: max(0, u.CacheCreationInputTokens),
+			ephemeral1hTokens:   eph1h,
 		}
 	}
 	return e, true

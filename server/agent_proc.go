@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -45,30 +46,60 @@ type claudeProcResult struct {
 	found bool
 }
 
-// findClaudeSession returns the Claude Code session running under rootPID.
-// key names the pane, so a pane whose shell changed gets a new walk.
+// findClaudeSession returns the agent session running under rootPID (or
+// reported by a fresh lifecycle beacon for key). key names the pane, so a
+// pane whose shell changed gets a new walk.
 func findClaudeSession(key string, rootPID int) (AgentSession, bool) {
-	if rootPID <= 0 || !agentProcSupported {
-		return AgentSession{}, false
-	}
-	r, _ := agentTrees.do(fmt.Sprintf("%s|%d", key, rootPID), func() (claudeProcResult, error) {
-		children, err := procTables.do("", procChildrenFunc)
-		if err != nil {
-			return claudeProcResult{}, nil
+	var (
+		s     AgentSession
+		found bool
+	)
+	if rootPID > 1 && agentProcSupported {
+		r, _ := agentTrees.do(fmt.Sprintf("%s|%d", key, rootPID), func() (claudeProcResult, error) {
+			children, err := procTables.do("", procChildrenFunc)
+			if err != nil {
+				return claudeProcResult{}, nil
+			}
+			p, ok := walkForClaude(rootPID, children)
+			return claudeProcResult{p, ok}, nil
+		})
+		if r.found {
+			s, found = sessionOfProc(r.p)
 		}
-		p, ok := walkForClaude(rootPID, children)
-		return claudeProcResult{p, ok}, nil
-	})
-	if !r.found {
-		return AgentSession{}, false
 	}
-	return sessionOfProc(r.p)
+	if defaultBeaconsDir != "" && key != "" {
+		if b, ok := readAgentBeacon(defaultBeaconsDir, key, time.Now()); ok {
+			if found {
+				if b.Harness == s.Agent || s.Agent == "" {
+					if b.Status != "" {
+						s.Status = b.Status
+					}
+					if s.Rollout == "" && b.Transcript != "" {
+						s.Rollout = b.Transcript
+					}
+					if s.Agent != "claude" && b.SessionID != "" && (s.ID == "" || strings.HasPrefix(s.ID, "pid-")) {
+						s.ID = b.SessionID
+					}
+				}
+				return s, true
+			}
+			bs := AgentSession{
+				Agent: b.Harness, ID: b.SessionID, Status: b.Status,
+				Rollout: b.Transcript, PID: b.PID, DialogsReadOnly: b.Harness != "claude",
+			}
+			if bs.ID == "" {
+				bs.ID = fmt.Sprintf("pid-%d", b.PID)
+			}
+			return bs, true
+		}
+	}
+	return s, found
 }
 
 // findClaudeSessionNow is findClaudeSession without caches, for the checks
 // right before a write.
 func findClaudeSessionNow(rootPID int) (AgentSession, bool) {
-	if rootPID <= 0 || !agentProcSupported {
+	if rootPID <= 1 || !agentProcSupported {
 		return AgentSession{}, false
 	}
 	children, err := procChildrenFunc()
@@ -84,24 +115,35 @@ func findClaudeSessionNow(rootPID int) (AgentSession, bool) {
 	return sessionOfProc(p)
 }
 
-// sessionOfProc reads the session file of a proven Claude Code process, or
-// the rollout a Codex process holds.
+// sessionOfProc reads the session file of a proven Claude Code process,
+// the rollout a Codex process holds, or the process metadata of another
+// supported harness.
 func sessionOfProc(p claudeProc) (AgentSession, bool) {
-	if p.agent == "codex" {
+	switch p.agent {
+	case "codex":
 		return codexSessionOf(p, "", true)
+	case "claude":
+		f, ok := readClaudeSessionFile(p.claudeDir, p.pid)
+		if !ok || f.procStart() != p.procStart || !isSessionID(f.SessionID) {
+			return AgentSession{}, false
+		}
+		return AgentSession{
+			Agent: "claude", ID: f.SessionID, Status: claudeStatus(f.Status),
+			ClaudeDir: p.claudeDir, ClaudeWindow: p.window, PID: p.pid, ProcStart: p.procStart,
+		}, true
+	default:
+		if p.agent == "" {
+			return AgentSession{}, false
+		}
+		return AgentSession{
+			Agent: p.agent, ID: fmt.Sprintf("pid-%d", p.pid), Status: "idle",
+			PID: p.pid, ProcStart: p.procStart, DialogsReadOnly: true,
+		}, true
 	}
-	f, ok := readClaudeSessionFile(p.claudeDir, p.pid)
-	if !ok || f.procStart() != p.procStart || !isSessionID(f.SessionID) {
-		return AgentSession{}, false
-	}
-	return AgentSession{
-		Agent: "claude", ID: f.SessionID, Status: claudeStatus(f.Status),
-		ClaudeDir: p.claudeDir, ClaudeWindow: p.window, PID: p.pid, ProcStart: p.procStart,
-	}, true
 }
 
-// walkForClaude searches rootPID and its descendants breadth-first for Claude
-// Code or Codex; the first one met wins.
+// walkForClaude searches rootPID and its descendants breadth-first for a
+// supported agent harness; the first one met wins.
 func walkForClaude(rootPID int, children func(int) []int) (claudeProc, bool) {
 	domain := claudePIDDomain()
 	type node struct{ pid, depth int }
@@ -114,6 +156,9 @@ func walkForClaude(rootPID int, children func(int) []int) (claudeProc, bool) {
 			return p, true
 		}
 		if p, ok := codexProcOf(n.pid); ok {
+			return p, true
+		}
+		if p, ok := otherHarnessProcOf(n.pid); ok {
 			return p, true
 		}
 		if n.depth == agentProcMaxDepth {

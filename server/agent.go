@@ -89,7 +89,13 @@ type journalAdapter interface {
 	Parse(r io.Reader, start int64) ([]TranscriptEntry, int64)
 }
 
-var journalAdapters = map[string]journalAdapter{"claude": claudeJournal{}, "codex": codexJournal{}}
+var journalAdapters = map[string]journalAdapter{
+	"claude":   claudeJournal{},
+	"codex":    codexJournal{},
+	"opencode": opencodeJournal{},
+	"pi":       piJournal{agent: "pi"},
+	"omp":      piJournal{agent: "omp"},
+}
 
 type TranscriptEntry struct {
 	ID    string           `json:"id"`
@@ -101,17 +107,24 @@ type TranscriptEntry struct {
 	// the last Codex assistant entry before a token_count row), for the
 	// overview; never sent with the transcript.
 	usage *entryUsage
+	// bustReason: "model" | "effort" | "compaction" when this entry busted
+	// the prompt cache.
+	bustReason string
 }
 
 // entryUsage is an assistant row's context size in tokens and its model.
 // Codex also names its context window and the account's rate limits; a
 // Codex row that carries only limits has noContext set.
 type entryUsage struct {
-	contextTokens int64
-	model         string
-	window        int64
-	noContext     bool
-	limits        *codexLimits
+	contextTokens       int64
+	model               string
+	window              int64
+	noContext           bool
+	limits              *codexLimits
+	inputTokens         int64
+	cacheReadTokens     int64
+	cacheCreationTokens int64
+	ephemeral1hTokens   int64
 }
 
 // codexLimits is an account's rate limits as a token_count row recorded
@@ -354,6 +367,13 @@ type agentAPI struct {
 	// claudeModels: the model each Claude transcript last names, for the
 	// overview's context window.
 	claudeModels *claudeModels
+	// cacheWarn deduplicates cache-cold alerts per warm cycle; emitPush
+	// delivers them through the push watcher when configured.
+	cacheWarn *cacheWarnTracker
+	emitPush  func(pushEvent) bool
+	launchers *launchersStore
+	machine   *machineCollector
+	crew      *CrewManager
 	// devices: devices can be paired (the snapshot's caps.devices); set by
 	// buildServer.
 	devices bool
@@ -388,6 +408,7 @@ func newAgentAPI(m Mux) *agentAPI {
 		subagentState:  newSubagentStore(time.Now),
 		subagentWrites: newTTLCache[time.Time](subagentsTTL),
 		claudeModels:   newClaudeModels(),
+		cacheWarn:      newCacheWarnTracker(),
 	}
 }
 
@@ -396,9 +417,25 @@ func registerAgentRoutes(mux *http.ServeMux, m Mux, uploads *uploadStore) *agent
 	a.uploads = uploads
 	mux.HandleFunc("/api/mux/panes/{id}/agent/transcript", a.handleTranscript)
 	mux.HandleFunc("/api/mux/panes/{id}/agent/subagents", a.handleSubagents)
+	mux.HandleFunc("/api/mux/panes/{id}/agent/ack", a.handleAck)
 	mux.HandleFunc("/api/mux/overview", a.handleOverview)
 	a.registerInputRoutes(mux)
 	return a
+}
+
+// handleAck handles POST /api/mux/panes/{id}/agent/ack, locally acknowledging
+// a pane's "done" status without stealing desktop focus via Herdr.
+func (a *agentAPI) handleAck(w http.ResponseWriter, r *http.Request) {
+	if !requireWriteRole(w, r) || !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	paneID := strings.TrimSpace(r.PathValue("id"))
+	if paneID == "" || len(paneID) > 128 || invalidTmuxChars.MatchString(paneID) {
+		jsonErrorCode(w, "invalid_pane", "invalid pane id", http.StatusBadRequest)
+		return
+	}
+	acked := a.activity.Ack(paneID)
+	jsonOK(w, map[string]any{"ok": true, "acked": acked})
 }
 
 // session returns the pane's agent session, shared between concurrent

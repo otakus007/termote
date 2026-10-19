@@ -74,10 +74,39 @@ type activityTracker struct {
 	seq       uint64
 	last      Snapshot
 	hasLast   bool
+	acked     map[string]time.Time
+	emitPush  func(pushEvent) bool
 }
 
 func newActivityTracker(now func() time.Time) *activityTracker {
-	return &activityTracker{now: now, states: map[string]activityState{}, indexTabs: map[string]string{}}
+	return &activityTracker{
+		now:       now,
+		states:    map[string]activityState{},
+		indexTabs: map[string]string{},
+		acked:     map[string]time.Time{},
+	}
+}
+
+func (t *activityTracker) setEmitPush(fn func(pushEvent) bool) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.emitPush = fn
+	t.mu.Unlock()
+}
+
+func (t *activityTracker) emitPushEvent(ev pushEvent) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	fn := t.emitPush
+	t.mu.Unlock()
+	if fn != nil {
+		return fn(ev)
+	}
+	return false
 }
 
 // begin numbers a snapshot read; call it before reading, and give the number
@@ -134,6 +163,7 @@ func (t *activityTracker) fold(snap Snapshot, now time.Time) {
 	for _, k := range gone {
 		if s := t.states[k]; !seen[k] {
 			delete(t.states, k)
+			delete(t.acked, k)
 			t.record(now, s, s.status, "")
 		}
 	}
@@ -151,13 +181,17 @@ func (t *activityTracker) fold(snap Snapshot, now time.Time) {
 				switch {
 				case !known:
 					s.since, s.firstSeen = now, true
+					delete(t.acked, k)
 					// A pane forgotten for a renumbering did not appear.
 					if !reset[g.ID] {
 						t.record(now, s, "", status)
 					}
 				case status != prev.status:
 					s.since, s.firstSeen = now, false
+					delete(t.acked, k)
 					t.record(now, s, prev.status, status)
+				case status != "done":
+					delete(t.acked, k)
 				}
 				t.states[k] = s
 			}
@@ -187,6 +221,7 @@ func (t *activityTracker) resetRenumbered(snap Snapshot) map[string]bool {
 			for k, s := range t.states {
 				if s.groupID == g.ID {
 					delete(t.states, k)
+					delete(t.acked, k)
 				}
 			}
 		}
@@ -232,7 +267,7 @@ func (t *activityTracker) record(now time.Time, s activityState, from, to string
 }
 
 // annotate copies snap, giving every tracked pane a new AgentInfo with its
-// since.
+// since, and folding locally acknowledged "done" panes to "idle".
 func (t *activityTracker) annotate(snap Snapshot) Snapshot {
 	out := copySnapshot(snap)
 	for gi := range out.Groups {
@@ -244,15 +279,47 @@ func (t *activityTracker) annotate(snap Snapshot) Snapshot {
 					continue
 				}
 				a := *p.Agent
-				if s, ok := t.states[paneKey(*p)]; ok {
+				k := paneKey(*p)
+				if s, ok := t.states[k]; ok {
 					a.Since = s.since.Format(activityTimeFormat)
 					a.SinceFirstSeen = s.firstSeen
+					if ackSince, acked := t.acked[k]; acked && ackSince.Equal(s.since) && a.Status == "done" {
+						a.Status = "idle"
+					}
 				}
 				p.Agent = &a
 			}
 		}
 	}
 	return out
+}
+
+// Ack locally acknowledges a pane whose current status is "done", folding its
+// annotated status to "idle" until the next turn without invoking herdr's
+// agent.focus.
+func (t *activityTracker) Ack(paneID string) bool {
+	if t == nil || paneID == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var matchedKey string
+	var matchedState activityState
+	for k, s := range t.states {
+		if s.paneID == paneID || k == paneID || s.key == paneID {
+			matchedKey = k
+			matchedState = s
+			break
+		}
+	}
+	if matchedKey == "" || matchedState.status != "done" {
+		return false
+	}
+	t.acked[matchedKey] = matchedState.since
+	if t.hasLast {
+		t.last = t.annotate(t.last)
+	}
+	return true
 }
 
 // eventsAfter is the page of events after seq after (every kept one when
@@ -301,6 +368,11 @@ func (t *activityTracker) renameGroup(from, to string) {
 		states[renamedGroupID(k, from, to)] = s
 	}
 	t.states = states
+	acked := make(map[string]time.Time, len(t.acked))
+	for k, ts := range t.acked {
+		acked[renamedGroupID(k, from, to)] = ts
+	}
+	t.acked = acked
 	for i := range t.ring {
 		e := &t.ring[i]
 		e.GroupID = renamedGroupID(e.GroupID, from, to)

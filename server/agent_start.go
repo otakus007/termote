@@ -18,11 +18,20 @@ import (
 // once; readiness is read afterwards from agent.get, so the POST never waits
 // for the agent and the PWA polls the GET.
 
-// agentStartArgs are the kinds a client may start and the arguments each one
-// gets. Nothing in a request adds to them.
+// agentStartArgs are the kinds a client may start and the default arguments
+// each one gets before validated option chips are appended.
 var agentStartArgs = map[string][]string{
-	"claude": nil,
-	"codex":  {"--no-daemon"},
+	"claude":      nil,
+	"codex":       {"--no-daemon"},
+	"opencode":    nil,
+	"pi":          nil,
+	"omp":         nil,
+	"gemini":      nil,
+	"antigravity": nil,
+	"cursor":      nil,
+	"grok":        nil,
+	"hermes":      nil,
+	"openclaw":    nil,
 }
 
 // agentStartKind: kind can be started on this server. Codex only where it
@@ -192,9 +201,11 @@ func (a *agentAPI) startAgent(w http.ResponseWriter, r *http.Request) {
 	if !requireWriteRole(w, r) {
 		return
 	}
-	// Only kind is read: arguments and the alias are the server's.
 	var body struct {
-		Kind string `json:"kind"`
+		Kind     string   `json:"kind"`
+		Harness  string   `json:"harness"`
+		RecipeID string   `json:"recipeId"`
+		Options  []string `json:"options"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -206,16 +217,49 @@ func (a *agentAPI) startAgent(w http.ResponseWriter, r *http.Request) {
 		jsonErrorCode(w, "invalid_request", "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	args, ok := agentStartArgs[body.Kind]
+	kind := body.Kind
+	if kind == "" {
+		kind = body.Harness
+	}
+	options := body.Options
+	if body.RecipeID != "" {
+		rcp, ok := a.launchers.recipeByID(body.RecipeID)
+		if !ok {
+			jsonErrorCode(w, "recipe_not_found", "launcher recipe not found", http.StatusNotFound)
+			return
+		}
+		if kind == "" {
+			kind = rcp.Harness
+		}
+		options = append(append([]string(nil), rcp.Options...), options...)
+	}
+	baseArgs, ok := agentStartArgs[kind]
 	if !ok {
-		jsonErrorCode(w, "invalid_kind", "kind must be claude or codex", http.StatusBadRequest)
+		jsonErrorCode(w, "invalid_kind", "unsupported agent harness", http.StatusBadRequest)
 		return
+	}
+	if !validateLaunchOptions(options) {
+		jsonErrorCode(w, "invalid_options", "invalid launch option flags", http.StatusBadRequest)
+		return
+	}
+	args := append([]string(nil), baseArgs...)
+	for _, opt := range options {
+		already := false
+		for _, existing := range args {
+			if existing == opt {
+				already = true
+				break
+			}
+		}
+		if !already {
+			args = append(args, opt)
+		}
 	}
 	st, ok := a.starter(w)
 	if !ok {
 		return
 	}
-	if !agentStartKind(body.Kind) {
+	if !agentStartKind(kind) {
 		jsonErrorCode(w, errStartKind.code, errStartKind.msg, errStartKind.status)
 		return
 	}
@@ -248,11 +292,14 @@ func (a *agentAPI) startAgent(w http.ResponseWriter, r *http.Request) {
 	prev, hadPrev := a.starts.get(paneID, time.Now())
 	// Recorded before Herdr is asked, so a GET while the POST runs (which
 	// can take seconds) reports it starting rather than no_start.
-	a.starts.put(paneID, pendingStart{kind: body.Kind, started: time.Now(), state: startStarting})
-	name, err := st.StartAgent(ctx, paneID, body.Kind, args)
+	a.starts.put(paneID, pendingStart{kind: kind, started: time.Now(), state: startStarting})
+	name, err := st.StartAgent(ctx, paneID, kind, args)
 	switch {
 	case err == nil || errors.Is(err, errStartUnknown):
-		a.starts.put(paneID, pendingStart{kind: body.Kind, name: name, started: time.Now(), state: startStarting})
+		a.starts.put(paneID, pendingStart{kind: kind, name: name, started: time.Now(), state: startStarting})
+		if a.launchers != nil {
+			_ = a.launchers.recordRecentCommand(formatLaunchedCommand(kind, options))
+		}
 	case hadPrev:
 		a.starts.put(paneID, prev)
 	default:
