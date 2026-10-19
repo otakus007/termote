@@ -44,7 +44,7 @@ var (
 	pushHostSuffixes = []string{".push.apple.com", ".notify.windows.com"}
 	pushHostRe       = regexp.MustCompile(`^[a-z0-9-]+(\.[a-z0-9-]+)+$`)
 	// pushPartRe matches the store's temporary files, left behind by a crash.
-	pushPartRe = regexp.MustCompile(`^\.(subscriptions|vapid)-[0-9a-f]{16}\.part$`)
+	pushPartRe = regexp.MustCompile(`^\.(subscriptions|vapid|notify-config|telegram)-[0-9a-f]{16}\.part$`)
 )
 
 var (
@@ -77,8 +77,8 @@ type vapidToken struct {
 	exp    time.Time
 }
 
-// pushStore owns <stateDir>/push: the VAPID key pair and the subscriptions.
-// Neither file is ever served; only the public key is.
+// pushStore owns <stateDir>/push: the VAPID key pair, subscriptions,
+// notification preferences, and Telegram bot configuration.
 type pushStore struct {
 	dir      string
 	key      *ecdsa.PrivateKey
@@ -87,16 +87,25 @@ type pushStore struct {
 	gen      string
 	now      func() time.Time
 
-	// mu covers subs, tokens and every write of subscriptions.json.
-	mu     sync.Mutex
-	subs   []pushSub
-	tokens map[string]vapidToken
+	telegramBaseURL string
+	telegramHTTP    *http.Client
+
+	// mu covers subs, tokens, cfg, telegram, pollHeartbeats, and state file writes.
+	mu              sync.Mutex
+	subs            []pushSub
+	tokens          map[string]vapidToken
+	cfg             notifyConfig
+	telegram        telegramConfig
+	telegramBackoff time.Time
+	pollHeartbeats  map[string]time.Time
+	isStreaming     func(paneID string) bool
+	emitExternal    func(pushEvent) bool
 }
 
 // newPushStore opens dir (created 0700; a symlink or, on Unix, a dir another
 // user owns is refused), loads or creates vapid.json and loads
-// subscriptions.json, dropping entries not made with the current credential
-// (user and pass, or noAuth) or whose endpoint is no longer accepted.
+// subscriptions.json, notify-config.json, and telegram.json, dropping entries
+// not made with the current credential (user and pass, or noAuth).
 func newPushStore(dir, user, pass string, noAuth bool) (*pushStore, error) {
 	if dir == "" {
 		return nil, errors.New("no push state dir")
@@ -111,21 +120,37 @@ func newPushStore(dir, user, pass string, noAuth bool) (*pushStore, error) {
 	if err := checkPrivateDir(dir); err != nil {
 		return nil, err
 	}
-	s := &pushStore{dir: dir, now: time.Now, tokens: map[string]vapidToken{}}
+	s := &pushStore{
+		dir:            dir,
+		now:            time.Now,
+		tokens:         map[string]vapidToken{},
+		cfg:            defaultNotifyConfig(),
+		pollHeartbeats: map[string]time.Time{},
+	}
 	removeStateParts(s.dir, pushPartRe)
 	if err := s.loadKeys(); err != nil {
 		return nil, err
 	}
-	s.gen = pushNoAuthGen
-	if !noAuth {
-		mac := hmac.New(sha256.New, s.bindKey)
-		mac.Write([]byte(user + "\x00" + pass))
-		s.gen = hex.EncodeToString(mac.Sum(nil))
-	}
+	s.gen = s.computeGen(user, pass, noAuth)
 	if err := s.loadSubs(); err != nil {
 		return nil, err
 	}
+	if err := s.loadNotifyConfig(); err != nil {
+		return nil, err
+	}
+	if err := s.loadTelegram(); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+func (s *pushStore) computeGen(user, pass string, noAuth bool) string {
+	if noAuth {
+		return pushNoAuthGen
+	}
+	mac := hmac.New(sha256.New, s.bindKey)
+	mac.Write([]byte(user + "\x00" + pass))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // loadKeys reads vapid.json, or creates it when missing. A file that cannot
@@ -389,4 +414,110 @@ func (s *pushStore) authorization(endpoint string, now time.Time) string {
 	}
 	s.tokens[aud] = vapidToken{header, now.Add(vapidTTL)}
 	return header
+}
+
+// hasTargets reports whether at least one Web Push subscription or an enabled
+// Telegram bot is configured.
+func (s *pushStore) hasTargets() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.subs) > 0 || (s.telegram.Enabled && s.telegram.BotToken != "" && s.telegram.ChatID != "")
+}
+
+// setStreamChecker registers a callback that reports whether a pane has an
+// active WebSocket terminal stream.
+func (s *pushStore) setStreamChecker(fn func(paneID string) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.isStreaming = fn
+}
+
+func (s *pushStore) setEmitExternal(fn func(pushEvent) bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.emitExternal = fn
+}
+
+func (s *pushStore) EmitExternal(ev pushEvent) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	fn := s.emitExternal
+	s.mu.Unlock()
+	if fn != nil {
+		return fn(ev)
+	}
+	return false
+}
+
+func validTarget(paneID string) bool {
+	return validateTmuxTarget(paneID)
+}
+
+// recordViewing records a foreground snapshot poll heartbeat for paneID.
+func (s *pushStore) recordViewing(paneID string) {
+	paneID = strings.TrimSpace(paneID)
+	if !validTarget(paneID) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	for id, ts := range s.pollHeartbeats {
+		if now.Sub(ts) >= presenceHeartbeatTTL {
+			delete(s.pollHeartbeats, id)
+		}
+	}
+	s.pollHeartbeats[paneID] = now
+}
+
+// isViewing reports whether paneID currently has an active WebSocket stream
+// or a foreground poll heartbeat within presenceHeartbeatTTL.
+func (s *pushStore) isViewing(paneID string, now time.Time) bool {
+	if paneID == "" {
+		return false
+	}
+	s.mu.Lock()
+	streamFn := s.isStreaming
+	ts, hasHeartbeat := s.pollHeartbeats[paneID]
+	if hasHeartbeat && now.Sub(ts) >= presenceHeartbeatTTL {
+		delete(s.pollHeartbeats, paneID)
+		hasHeartbeat = false
+	}
+	s.mu.Unlock()
+
+	if hasHeartbeat {
+		return true
+	}
+	if streamFn != nil && streamFn(paneID) {
+		return true
+	}
+	return false
+}
+
+// rebind rotates the credential binding (Gen) and clears subscriptions,
+// notify-config.json, and telegram.json when the credential changes.
+func (s *pushStore) rebind(user, pass string, noAuth bool) error {
+	nextGen := s.computeGen(user, pass, noAuth)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if nextGen == s.gen {
+		return nil
+	}
+	s.gen = nextGen
+	s.subs = nil
+	s.cfg = defaultNotifyConfig()
+	s.telegram = telegramConfig{}
+	s.telegramBackoff = time.Time{}
+	for _, name := range []string{pushSubsFile, notifyConfigFile, telegramFile} {
+		path := filepath.Join(s.dir, name)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove %s: %w", name, err)
+		}
+	}
+	return nil
 }

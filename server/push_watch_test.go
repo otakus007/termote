@@ -131,10 +131,14 @@ func newTestWatcher(t *testing.T, snaps func() (Snapshot, error)) (*pushWatcher,
 	t.Helper()
 	var peeks atomic.Int32
 	f := &fakePush{}
+	store := newTestPushStore(t)
+	store.cfg.BlockedSettleSec = 0
+	store.cfg.DoneSettleSec = 0
+	store.cfg.CooldownSec = 0
 	w := newPushWatcher(func(context.Context) (Snapshot, error) {
 		peeks.Add(1)
 		return snaps()
-	}, newTestPushStore(t), f.send)
+	}, store, f.send)
 	return w, f, &peeks
 }
 
@@ -364,5 +368,216 @@ func TestPushWatcherStopsWithContext(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("watcher kept running after cancel")
+	}
+}
+
+func TestPushWatcherSettleWindows(t *testing.T) {
+	now := time.Date(2026, 10, 16, 10, 0, 0, 0, time.UTC)
+	status := "working"
+	w, _, _ := newTestWatcher(t, func() (Snapshot, error) {
+		return statusSnap(map[string]string{"p1": status}), nil
+	})
+	w.now = func() time.Time { return now }
+	w.store.now = w.now
+	w.store.cfg = defaultNotifyConfig() // blocked=5s, done=15s, cooldown=30s
+	w.store.cfg.CooldownSec = 0
+	if err := w.store.add(fcmSub(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	w.tick(ctx) // initial observation: working
+
+	// Transition working -> done, then return to working before 15s settle expires.
+	status = "done"
+	now = now.Add(time.Second)
+	w.tick(ctx)
+	if len(w.queue) != 0 {
+		t.Fatalf("queued before settle window: %d", len(w.queue))
+	}
+	now = now.Add(10 * time.Second)
+	w.tick(ctx)
+	if len(w.queue) != 0 {
+		t.Fatalf("queued at 10s (<15s done settle): %d", len(w.queue))
+	}
+	status = "working"
+	now = now.Add(2 * time.Second)
+	w.tick(ctx)
+	now = now.Add(20 * time.Second)
+	w.tick(ctx)
+	if len(w.queue) != 0 {
+		t.Fatalf("cancelled done transition still fired: %d", len(w.queue))
+	}
+
+	// Transition working -> blocked, settles after 5s.
+	status = "blocked"
+	now = now.Add(time.Second)
+	w.tick(ctx)
+	now = now.Add(4 * time.Second)
+	w.tick(ctx)
+	if len(w.queue) != 0 {
+		t.Fatalf("blocked fired at 4s (<5s): %d", len(w.queue))
+	}
+	now = now.Add(time.Second)
+	w.tick(ctx)
+	if len(w.queue) != 1 {
+		t.Fatalf("blocked did not fire at 5s: %d", len(w.queue))
+	}
+	if e := <-w.queue; e.Kind != "blocked" || e.PaneID != "p1" {
+		t.Fatalf("unexpected event: %+v", e)
+	}
+}
+
+func TestPushWatcherCooldown(t *testing.T) {
+	now := time.Date(2026, 10, 16, 10, 0, 0, 0, time.UTC)
+	status := "working"
+	w, _, _ := newTestWatcher(t, func() (Snapshot, error) {
+		return statusSnap(map[string]string{"p1": status}), nil
+	})
+	w.now = func() time.Time { return now }
+	w.store.now = w.now
+	w.store.cfg.CooldownSec = 30
+	if err := w.store.add(fcmSub(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	w.tick(ctx)
+
+	status = "blocked"
+	w.tick(ctx)
+	if len(w.queue) != 1 {
+		t.Fatalf("first blocked did not fire: %d", len(w.queue))
+	}
+	<-w.queue
+
+	// Repeat transition within 30s cooldown is suppressed.
+	status = "working"
+	now = now.Add(5 * time.Second)
+	w.tick(ctx)
+	status = "blocked"
+	now = now.Add(5 * time.Second)
+	w.tick(ctx)
+	if len(w.queue) != 0 {
+		t.Fatalf("second blocked within 30s cooldown was not suppressed: %d", len(w.queue))
+	}
+
+	// After 30s cooldown expires, a new transition fires.
+	status = "working"
+	now = now.Add(10 * time.Second)
+	w.tick(ctx)
+	status = "blocked"
+	now = now.Add(15 * time.Second)
+	w.tick(ctx)
+	if len(w.queue) != 1 {
+		t.Fatalf("blocked after cooldown did not fire: %d", len(w.queue))
+	}
+}
+
+func TestPushWatcherPresenceHoldAndDrop(t *testing.T) {
+	now := time.Date(2026, 10, 16, 10, 0, 0, 0, time.UTC)
+	status := "working"
+	w, _, _ := newTestWatcher(t, func() (Snapshot, error) {
+		return statusSnap(map[string]string{"p1": status}), nil
+	})
+	w.now = func() time.Time { return now }
+	w.store.now = w.now
+	w.store.cfg.SkipWhileViewing = true
+	if err := w.store.add(fcmSub(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	w.tick(ctx)
+
+	// Viewer is actively watching p1 via poll heartbeat.
+	w.store.recordViewing("p1")
+
+	// working -> done while viewing is dropped completely.
+	status = "done"
+	now = now.Add(5 * time.Second)
+	w.tick(ctx)
+	if len(w.queue) != 0 {
+		t.Fatalf("done fired while viewing: %d", len(w.queue))
+	}
+	// Even after heartbeat expires (15s), the dropped done event does not fire.
+	now = now.Add(20 * time.Second)
+	w.tick(ctx)
+	if len(w.queue) != 0 {
+		t.Fatalf("dropped done fired after viewer left: %d", len(w.queue))
+	}
+
+	// Now viewer is watching p1 via active stream and p1 transitions working -> blocked.
+	streaming := true
+	w.store.setStreamChecker(func(paneID string) bool { return streaming && paneID == "p1" })
+	status = "working"
+	w.tick(ctx)
+	status = "blocked"
+	now = now.Add(5 * time.Second)
+	w.tick(ctx)
+	if len(w.queue) != 0 {
+		t.Fatalf("blocked fired while streaming: %d", len(w.queue))
+	}
+
+	// Viewer disconnects stream while p1 is still blocked -> held notification fires immediately!
+	streaming = false
+	now = now.Add(5 * time.Second)
+	w.tick(ctx)
+	if len(w.queue) != 1 {
+		t.Fatalf("held blocked did not fire when viewer disconnected: %d", len(w.queue))
+	}
+	if e := <-w.queue; e.Kind != "blocked" || e.PaneID != "p1" {
+		t.Fatalf("unexpected event: %+v", e)
+	}
+}
+
+func TestPushWatcherMuteAndCategories(t *testing.T) {
+	now := time.Date(2026, 10, 16, 10, 0, 0, 0, time.UTC)
+	status := "working"
+	w, _, _ := newTestWatcher(t, func() (Snapshot, error) {
+		return statusSnap(map[string]string{"p1": status}), nil
+	})
+	w.now = func() time.Time { return now }
+	w.store.now = w.now
+	if err := w.store.add(fcmSub(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mute for 60 minutes.
+	if _, err := w.store.setMute(60); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	w.tick(ctx)
+	status = "blocked"
+	w.tick(ctx)
+	if len(w.queue) != 0 {
+		t.Fatalf("queued while muted: %d", len(w.queue))
+	}
+	if w.EmitExternal(pushEvent{Kind: "machine-load"}) {
+		t.Fatal("EmitExternal succeeded while muted")
+	}
+
+	// Unmute with durationMinutes = 0.
+	if _, err := w.store.setMute(0); err != nil {
+		t.Fatal(err)
+	}
+	if !w.EmitExternal(pushEvent{Kind: "machine-load"}) || len(w.queue) != 1 {
+		t.Fatalf("EmitExternal failed after unmute: %d", len(w.queue))
+	}
+	<-w.queue
+
+	// Update category is disabled by default.
+	if w.EmitExternal(pushEvent{Kind: "update"}) {
+		t.Fatal("EmitExternal succeeded for disabled update category")
+	}
+	tTrue := true
+	if _, err := w.store.updateNotifyConfig(notifyConfigUpdate{
+		Categories: &notifyCategoriesUpdate{Update: &tTrue},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !w.EmitExternal(pushEvent{Kind: "update"}) || len(w.queue) != 1 {
+		t.Fatal("EmitExternal failed after enabling update category")
 	}
 }

@@ -211,3 +211,100 @@ func TestSnapshotPeekCreatesNothing(t *testing.T) {
 		t.Fatalf("peeked %d, snapped %d", m.peeked, m.snapped)
 	}
 }
+
+func TestNotifyRoutesConfigMuteAndTelegram(t *testing.T) {
+	h, store := pushHandler(t, false)
+
+	// GET /api/mux/notify/config returns defaults with Cache-Control: no-store.
+	rec := serve(h, apiRequest("GET", "/api/mux/notify/config", ""))
+	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("GET config = %d %s (cc=%q)", rec.Code, rec.Body, rec.Header().Get("Cache-Control"))
+	}
+	var cfgResp notifyConfigResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfgResp); err != nil {
+		t.Fatal(err)
+	}
+	if cfgResp.BlockedSettleSec != 5 || cfgResp.DoneSettleSec != 15 || cfgResp.CooldownSec != 30 || !cfgResp.SkipWhileViewing {
+		t.Fatalf("unexpected defaults: %+v", cfgResp)
+	}
+
+	// Cross-site GET on /api/mux/notify/config is rejected.
+	crossGet := apiRequest("GET", "/api/mux/notify/config", "")
+	crossGet.Header.Set("Sec-Fetch-Site", "cross-site")
+	if r := serve(h, crossGet); r.Code != http.StatusForbidden {
+		t.Fatalf("cross-site GET config = %d, want 403", r.Code)
+	}
+
+	// PUT /api/mux/notify/config updates preferences and validates bounds/publicUrl.
+	rec = serve(h, apiRequest("PUT", "/api/mux/notify/config", `{"blockedSettleSec":10,"publicUrl":"https://termote.example.com","categories":{"update":true}}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT config = %d %s", rec.Code, rec.Body)
+	}
+	if store.notifyConfig().BlockedSettleSec != 10 || !store.notifyConfig().Categories.Update {
+		t.Fatalf("updated config = %+v", store.notifyConfig())
+	}
+
+	// Invalid settle window and non-localhost HTTP publicUrl are rejected with 400 invalid_config.
+	for _, badBody := range []string{
+		`{"blockedSettleSec":99}`,
+		`{"doneSettleSec":-1}`,
+		`{"cooldownSec":999}`,
+		`{"publicUrl":"http://evil.example.com"}`,
+		`{"publicUrl":"https://user:pass@termote.example.com"}`,
+	} {
+		r := serve(h, apiRequest("PUT", "/api/mux/notify/config", badBody))
+		if r.Code != http.StatusBadRequest || decodeBody(t, r)["code"] != "invalid_config" {
+			t.Fatalf("PUT invalid (%s) = %d %s", badBody, r.Code, r.Body)
+		}
+	}
+
+	// POST /api/mux/notify/mute sets and clears mute.
+	rec = serve(h, apiRequest("POST", "/api/mux/notify/mute", `{"durationMinutes":60}`))
+	if rec.Code != http.StatusOK || decodeBody(t, rec)["mutedUntil"] == "" {
+		t.Fatalf("POST mute = %d %s", rec.Code, rec.Body)
+	}
+	rec = serve(h, apiRequest("POST", "/api/mux/notify/mute", `{"durationMinutes":0}`))
+	if rec.Code != http.StatusOK || decodeBody(t, rec)["mutedUntil"] != "" {
+		t.Fatalf("POST unmute = %d %s", rec.Code, rec.Body)
+	}
+	rec = serve(h, apiRequest("POST", "/api/mux/notify/mute", `{"durationMinutes":2000}`))
+	if rec.Code != http.StatusBadRequest || decodeBody(t, rec)["code"] != "invalid_duration" {
+		t.Fatalf("POST invalid mute = %d %s", rec.Code, rec.Body)
+	}
+
+	// PUT /api/mux/notify/telegram saves credentials and never echoes botToken or full chatId.
+	secretToken := "123456:SECRET_BOT_TOKEN_ABC"
+	fullChatID := "-100123456789"
+	rec = serve(h, apiRequest("PUT", "/api/mux/notify/telegram", `{"botToken":"`+secretToken+`","chatId":"`+fullChatID+`","enabled":true}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT telegram = %d %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), secretToken) || strings.Contains(rec.Body.String(), fullChatID) {
+		t.Fatalf("PUT telegram leaked secret: %s", rec.Body.String())
+	}
+
+	rec = serve(h, apiRequest("GET", "/api/mux/notify/config", ""))
+	if strings.Contains(rec.Body.String(), secretToken) || strings.Contains(rec.Body.String(), fullChatID) {
+		t.Fatalf("GET config leaked telegram secret: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"chatIdTail":"6789"`) {
+		t.Fatalf("GET config missing chatIdTail: %s", rec.Body.String())
+	}
+
+	// DELETE /api/mux/notify/telegram removes configuration.
+	rec = serve(h, apiRequest("DELETE", "/api/mux/notify/telegram", `{}`))
+	if rec.Code != http.StatusOK || store.telegramStatus().Configured {
+		t.Fatalf("DELETE telegram = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestSnapshotViewingHeartbeat(t *testing.T) {
+	h, store := pushHandler(t, false)
+	rec := serve(h, apiRequest("GET", "/api/mux/snapshot?viewing=pane-7", ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("snapshot = %d %s", rec.Code, rec.Body)
+	}
+	if !store.isViewing("pane-7", store.now()) {
+		t.Fatal("expected pane-7 to be marked as viewing after snapshot poll")
+	}
+}

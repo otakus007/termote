@@ -7,7 +7,9 @@ import {
   cleanName,
   type NotifyContext,
   notificationContent,
+  type PendingNotify,
   shouldNotify,
+  stepSettleTracker,
 } from './agent-notify'
 
 interface Fixture {
@@ -177,5 +179,79 @@ describe('notificationContent', () => {
     expect(c.title).toBe('Agent finished')
     expect(c.options.body).toBe('Agent')
     expect(c.options.data.hash).toBe('')
+  })
+})
+
+describe('stepSettleTracker', () => {
+  it('holds blocked and done transitions until settle window elapses and cancels on flap', () => {
+    let prev = new Map<string, AgentStatus>([['p1', 'working']])
+    let pending = new Map<string, PendingNotify>()
+    const opts = { blockedSettleMs: 5000, doneSettleMs: 15000 }
+
+    // Transition to blocked at t=1000: queued until t=6000, not fired yet
+    const s1 = stepSettleTracker(
+      prev,
+      pending,
+      sessionsOf({ p1: 'blocked' }),
+      1000,
+      opts,
+    )
+    prev = s1.nextStatuses
+    pending = s1.nextPending
+    expect(s1.readyEvents).toEqual([])
+    expect(pending.size).toBe(1)
+
+    // Flap back to working at t=3000: pending blocked is cancelled
+    const s2 = stepSettleTracker(
+      prev,
+      pending,
+      sessionsOf({ p1: 'working' }),
+      3000,
+      opts,
+    )
+    prev = s2.nextStatuses
+    pending = s2.nextPending
+    expect(s2.readyEvents).toEqual([])
+    expect(pending.size).toBe(0)
+
+    // Transition to idle (done) at t=4000: queued until t=19000
+    const s3 = stepSettleTracker(
+      prev,
+      pending,
+      sessionsOf({ p1: 'idle' }),
+      4000,
+      opts,
+    )
+    prev = s3.nextStatuses
+    pending = s3.nextPending
+    expect(s3.readyEvents).toEqual([])
+    expect(pending.size).toBe(1)
+
+    // Still idle at t=19000: fires!
+    const s4 = stepSettleTracker(
+      prev,
+      pending,
+      sessionsOf({ p1: 'idle' }),
+      19000,
+      opts,
+    )
+    expect(s4.readyEvents).toHaveLength(1)
+    expect(s4.readyEvents[0].kind).toBe('done')
+    expect(s4.nextPending.size).toBe(0)
+  })
+
+  it('fires immediately when settle window is 0', () => {
+    const prev = new Map<string, AgentStatus>([['p1', 'working']])
+    const pending = new Map<string, PendingNotify>()
+    const s = stepSettleTracker(
+      prev,
+      pending,
+      sessionsOf({ p1: 'blocked' }),
+      1000,
+      { blockedSettleMs: 0, doneSettleMs: 0 },
+    )
+    expect(s.readyEvents).toHaveLength(1)
+    expect(s.readyEvents[0].kind).toBe('blocked')
+    expect(s.nextPending.size).toBe(0)
   })
 })

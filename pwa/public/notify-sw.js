@@ -44,7 +44,14 @@
   // Web Push from the server: ids only. The text is made here, with the
   // names read from the snapshot, cleaned as cleanName in
   // src/utils/agent-notify.ts does (the tests hold both to one vector).
-  const TITLES = { blocked: 'Agent needs you', done: 'Agent finished' }
+  const TITLES = {
+    blocked: 'Agent needs you',
+    done: 'Agent finished',
+    update: 'Termote update available',
+    'cache-cold': 'Prompt cache cooling',
+    'machine-load': 'High machine load',
+  }
+  const SERVER_KINDS = new Set(['update', 'machine-load'])
   const ICON = '/pwa-192x192.png'
   // Monochrome mark Android shows in the status bar
   const BADGE = '/badge-96x96.png'
@@ -68,15 +75,26 @@
     } catch {
       return null
     }
-    const ids = [ev?.groupId, ev?.tabId, ev?.paneId]
+    if (!ev || typeof ev.kind !== 'string' || !Object.hasOwn(TITLES, ev.kind)) {
+      return null
+    }
+    if (SERVER_KINDS.has(ev.kind)) {
+      return {
+        groupId: typeof ev.groupId === 'string' ? ev.groupId : '',
+        tabId: typeof ev.tabId === 'string' ? ev.tabId : '',
+        paneId: typeof ev.paneId === 'string' ? ev.paneId : '',
+        kind: ev.kind,
+      }
+    }
+    const ids = [ev.groupId, ev.tabId, ev.paneId]
     if (!ids.every((id) => typeof id === 'string' && id !== '')) return null
-    if (!Object.hasOwn(TITLES, ev.kind)) return null
     return ev
   }
 
   // Group, tab and agent names of the event's pane, or null when the
   // snapshot cannot be read (signed out, offline, slow).
   async function readNames(ev) {
+    if (!ev.paneId) return null
     try {
       // peek: no page is open, so nothing may be created for this read.
       const res = await fetch('/api/mux/snapshot?peek=1', {
@@ -96,6 +114,7 @@
 
   // The same link as formatDeepLink in src/utils/deep-link.ts.
   function deepLink(ev) {
+    if (!ev.groupId || !ev.tabId || !ev.paneId) return ''
     const path = [ev.groupId, ev.tabId, ev.paneId]
       .map(encodeURIComponent)
       .join('/')
@@ -116,7 +135,7 @@
     }
     const names = await readNames(ev)
     const options = {
-      tag: ev.paneId,
+      tag: ev.paneId || `termote-${ev.kind}`,
       renotify: true,
       icon: ICON,
       badge: BADGE,

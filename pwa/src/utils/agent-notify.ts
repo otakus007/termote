@@ -57,6 +57,63 @@ export function agentTransitions(
   return { next, events }
 }
 
+export interface SettleOptions {
+  blockedSettleMs: number
+  doneSettleMs: number
+}
+
+export interface PendingNotify {
+  event: AgentEvent
+  since: number
+}
+
+// Tracks pending transitions across snapshots and settles them once the
+// configured settle window has elapsed without returning to working.
+export function stepSettleTracker(
+  prevStatuses: ReadonlyMap<string, AgentStatus>,
+  pending: ReadonlyMap<string, PendingNotify>,
+  sessions: readonly Session[],
+  nowMs: number,
+  opts: SettleOptions = { blockedSettleMs: 0, doneSettleMs: 0 },
+): {
+  nextStatuses: Map<string, AgentStatus>
+  nextPending: Map<string, PendingNotify>
+  readyEvents: AgentEvent[]
+} {
+  const { next: nextStatuses, events } = agentTransitions(
+    prevStatuses,
+    sessions,
+  )
+  const nextPending = new Map<string, PendingNotify>()
+
+  for (const [paneId, pend] of pending) {
+    const status = nextStatuses.get(paneId)
+    if (!status) continue
+    const cancelled =
+      (pend.event.kind === 'blocked' && status !== 'blocked') ||
+      (pend.event.kind === 'done' && status !== 'done' && status !== 'idle')
+    if (!cancelled) {
+      nextPending.set(paneId, pend)
+    }
+  }
+
+  for (const ev of events) {
+    nextPending.set(ev.paneId, { event: ev, since: nowMs })
+  }
+
+  const readyEvents: AgentEvent[] = []
+  for (const [paneId, pend] of nextPending) {
+    const settleMs =
+      pend.event.kind === 'blocked' ? opts.blockedSettleMs : opts.doneSettleMs
+    if (nowMs - pend.since >= settleMs) {
+      nextPending.delete(paneId)
+      readyEvents.push(pend.event)
+    }
+  }
+
+  return { nextStatuses, nextPending, readyEvents }
+}
+
 export interface NotifyContext {
   enabled: boolean
   permission: NotificationPermission | 'unsupported'
