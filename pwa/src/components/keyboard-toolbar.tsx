@@ -12,11 +12,13 @@ import {
   CornerDownLeft,
   Delete,
   Ellipsis,
+  Grid2x2,
   History,
   ImagePlus,
   Keyboard,
   Languages,
   Send,
+  SlidersHorizontal,
   TextSelect,
   X,
 } from 'lucide-react'
@@ -31,6 +33,21 @@ import {
 } from 'react'
 import { useHaptic } from '../hooks/use-haptic'
 import { scrollEdgeMask, useScrollEdges } from '../hooks/use-scroll-edges'
+import {
+  BUILTIN_KEYS_PRESETS,
+  consumeLatchedModifiers,
+  DANGER_CONFIRM_MS,
+  DEFAULT_KEYS_LAYOUT,
+  dispatchStepToken,
+  INITIAL_STICKY_MODIFIERS,
+  type KeyCell,
+  type KeysBoardLayout,
+  type KeysPresetId,
+  nextStickyModifierState,
+  STEP_DELAY_MS,
+  type StickyModifiersState,
+} from '../utils/keys-layout'
+import { KeysBoardEditor } from './keys-board-editor'
 import {
   QUICK_ACTIONS,
   type QuickActionHandlers,
@@ -70,6 +87,11 @@ interface Props {
   quickActions?: QuickActionHandlers
   // View-only session: no input controls at all
   readOnly?: boolean
+  // Customizable 2D keys board layout and editor callback
+  keysLayout?: KeysBoardLayout
+  onKeysLayoutChange?: (layout: KeysBoardLayout) => void
+  defaultBoardOpen?: boolean
+  leftHanded?: boolean
 }
 
 interface KeyConfig {
@@ -281,10 +303,29 @@ export function KeyboardToolbar({
   keyboardVisible = false,
   quickActions,
   readOnly = false,
+  keysLayout,
+  onKeysLayoutChange,
+  defaultBoardOpen = false,
+  leftHanded = false,
 }: Props) {
   const [internalCtrlActive, setInternalCtrlActive] = useState(false)
   const [internalShiftActive, setInternalShiftActive] = useState(false)
   const [expanded, setExpanded] = useState(defaultExpanded)
+  const [boardOpen, setBoardOpen] = useState(defaultBoardOpen)
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [localLayout, setLocalLayout] = useState<KeysBoardLayout>(
+    keysLayout ?? DEFAULT_KEYS_LAYOUT,
+  )
+  const activeLayout = keysLayout ?? localLayout
+
+  const [stickyMods, setStickyMods] = useState<StickyModifiersState>(
+    INITIAL_STICKY_MODIFIERS,
+  )
+  const lastModTapRef = useRef<{ mod: string; at: number } | null>(null)
+  const [armedKeyId, setArmedKeyId] = useState<string | null>(null)
+  const armedTimerRef = useRef<number | null>(null)
+  const stepTimersRef = useRef<number[]>([])
+
   const [internalImeMode, setInternalImeMode] = useState(false)
   const imeMode = externalImeMode ?? internalImeMode
   const [imeText, setImeText] = useState('')
@@ -299,8 +340,100 @@ export function KeyboardToolbar({
   useEffect(() => {
     return () => {
       if (imeFocusTimeoutRef.current) clearTimeout(imeFocusTimeoutRef.current)
+      if (armedTimerRef.current) clearTimeout(armedTimerRef.current)
+      for (const t of stepTimersRef.current) clearTimeout(t)
     }
   }, [])
+
+  const updateLayout = useCallback(
+    (next: KeysBoardLayout) => {
+      setLocalLayout(next)
+      onKeysLayoutChange?.(next)
+    },
+    [onKeysLayoutChange],
+  )
+
+  const handleBoardCellClick = useCallback(
+    (cell: KeyCell) => {
+      haptic('light')
+
+      // Sticky modifier key ('Ctrl' | 'Alt' | 'Shift')
+      if (cell.modifier) {
+        const now = Date.now()
+        const prevTap = lastModTapRef.current
+        const isDoubleTap =
+          prevTap !== null &&
+          prevTap.mod === cell.modifier &&
+          now - prevTap.at <= 320
+        lastModTapRef.current = isDoubleTap
+          ? null
+          : { mod: cell.modifier, at: now }
+        setStickyMods((prev) =>
+          nextStickyModifierState(prev, cell.modifier!, isDoubleTap),
+        )
+        return
+      }
+
+      // Two-tap danger confirmation (2.5s window)
+      if (cell.danger && armedKeyId !== cell.id) {
+        if (armedTimerRef.current) clearTimeout(armedTimerRef.current)
+        setArmedKeyId(cell.id)
+        armedTimerRef.current = window.setTimeout(() => {
+          setArmedKeyId(null)
+          armedTimerRef.current = null
+        }, DANGER_CONFIRM_MS)
+        return
+      }
+
+      if (armedKeyId === cell.id) {
+        if (armedTimerRef.current) {
+          clearTimeout(armedTimerRef.current)
+          armedTimerRef.current = null
+        }
+        setArmedKeyId(null)
+      }
+
+      const modsSnapshot = stickyMods
+      setStickyMods((prev) => consumeLatchedModifiers(prev))
+
+      const dispatchOne = (token: string) => {
+        if (token === 'Shift+Tab' && onShiftKey) {
+          onShiftKey('Tab')
+          return
+        }
+        if (token === 'Tab' && modsSnapshot.Shift !== 'off' && onShiftKey) {
+          onShiftKey('Tab')
+          return
+        }
+        dispatchStepToken(token, modsSnapshot, {
+          onKeyPress: onKey,
+          onCtrlKey,
+          onCtrlShiftKey,
+          onSendText,
+        })
+      }
+
+      const [first, ...rest] = cell.steps
+      if (first) dispatchOne(first)
+      rest.forEach((step, idx) => {
+        const timer = window.setTimeout(
+          () => dispatchOne(step),
+          STEP_DELAY_MS * (idx + 1),
+        )
+        stepTimersRef.current.push(timer)
+      })
+    },
+    [
+      haptic,
+      armedKeyId,
+      stickyMods,
+      onKey,
+      onCtrlKey,
+      onShiftKey,
+      onCtrlShiftKey,
+      onSendText,
+    ],
+  )
 
   // Keys filtered by the handlers and capabilities available
   // The main keys apart: their identity tells useScrollEdges the scroller's
@@ -628,9 +761,113 @@ export function KeyboardToolbar({
 
   return (
     <div
+      data-left-handed={leftHanded ? 'true' : undefined}
       className={`relative flex flex-col px-3 py-2 ${ROOT_CLASS}`}
       style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 0.5rem)' }}
     >
+      {boardOpen && (
+        <fieldset
+          aria-label="Keys board"
+          data-testid="keys-board-panel"
+          className="m-0 mb-2 flex min-w-0 flex-col gap-1.5 border-0 border-b border-border p-0 pb-2"
+        >
+          <div className="flex items-center justify-between gap-1.5">
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+              {(
+                [
+                  ['default', 'Default'],
+                  ['claude-code', 'Claude Code'],
+                  ['prefix', 'Prefix'],
+                  ['vim', 'Vim'],
+                  ['navigation', 'Navigation'],
+                ] as [Exclude<KeysPresetId, 'custom'>, string][]
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  data-preset={id}
+                  aria-pressed={activeLayout.preset === id}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => updateLayout(BUILTIN_KEYS_PRESETS[id])}
+                  className={`h-6 shrink-0 select-none rounded-control border px-2 text-[11px] font-medium transition-colors ${FOCUS_RING} ${
+                    activeLayout.preset === id
+                      ? 'border-accent bg-accent-soft text-accent-fg'
+                      : 'border-border bg-bg text-fg-muted hover:text-fg'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              data-testid="open-keys-editor"
+              aria-label="Customize keys"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => setEditorOpen(true)}
+              className={`flex h-6 shrink-0 select-none items-center gap-1 rounded-control border border-border bg-bg px-2 text-[11px] text-fg-muted hover:text-fg ${FOCUS_RING}`}
+            >
+              <SlidersHorizontal size={12} aria-hidden="true" />
+              Edit
+            </button>
+          </div>
+
+          <div
+            data-testid="keys-board-grid"
+            className="grid grid-cols-7 gap-1"
+            style={{ gridTemplateColumns: 'repeat(7, minmax(0, 1fr))' }}
+          >
+            {activeLayout.keys.map((cell) => {
+              const modState = cell.modifier
+                ? stickyMods[cell.modifier]
+                : undefined
+              const isArmed = armedKeyId === cell.id
+              return (
+                <button
+                  key={cell.id}
+                  type="button"
+                  data-key-id={cell.id}
+                  data-col-span={cell.colSpan}
+                  data-row-span={cell.rowSpan}
+                  data-danger={cell.danger ? 'true' : undefined}
+                  data-armed={isArmed ? 'true' : undefined}
+                  data-modifier-state={modState}
+                  aria-pressed={
+                    modState ? modState !== 'off' : isArmed ? true : undefined
+                  }
+                  onMouseDown={(e) => e.preventDefault()}
+                  onContextMenu={(e) => e.preventDefault()}
+                  onClick={() => handleBoardCellClick(cell)}
+                  style={{
+                    gridColumn: `span ${cell.colSpan} / span ${cell.colSpan}`,
+                    gridRow: `span ${cell.rowSpan} / span ${cell.rowSpan}`,
+                  }}
+                  className={`flex min-h-9 select-none items-center justify-center rounded-control border px-1 text-[12px] font-medium transition-colors ${FOCUS_RING} ${
+                    isArmed
+                      ? 'border-danger bg-danger text-white'
+                      : modState === 'locked'
+                        ? 'border-accent bg-accent text-white ring-2 ring-accent/40'
+                        : modState === 'latched'
+                          ? 'border-accent bg-accent-soft text-accent-fg'
+                          : cell.danger
+                            ? 'border-danger/40 bg-bg text-danger hover:bg-danger/10'
+                            : 'border-border bg-bg text-fg hover:bg-surface-hover'
+                  }`}
+                >
+                  <span className="truncate">
+                    {isArmed
+                      ? 'Tap again'
+                      : modState === 'locked'
+                        ? `${cell.label}●`
+                        : cell.label}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        </fieldset>
+      )}
+
       {expanded && (
         <>
           {quickActions && (
@@ -670,7 +907,9 @@ export function KeyboardToolbar({
           '^⇧',
         )}
 
-      <div className="flex items-center gap-2">
+      <div
+        className={`flex items-center gap-2 ${leftHanded ? 'flex-row-reverse' : ''}`}
+      >
         {/* A horizontal scroller clips vertically too: the native keycap's 1px
             bottom shadow needs room below it. Only there, so the other styles
             keep their height (the terminal would resize). The mask fades an
@@ -684,7 +923,25 @@ export function KeyboardToolbar({
           {mainKeys.map(renderKey)}
         </div>
         {/* Pinned outside the scroller, so it is always on screen */}
-        <div className="shrink-0 border-l border-border pl-2 ui-native:pb-0.5">
+        <div
+          className={`flex shrink-0 items-center gap-1 ui-native:pb-0.5 ${
+            leftHanded
+              ? 'border-r border-border pr-2'
+              : 'border-l border-border pl-2'
+          }`}
+        >
+          <Keycap
+            data-key="KeysBoard"
+            aria-label="Keys board"
+            aria-expanded={boardOpen}
+            pressed={boardOpen}
+            onClick={() => {
+              haptic('medium')
+              setBoardOpen((prev) => !prev)
+            }}
+          >
+            <Grid2x2 size={ICON_SIZE} />
+          </Keycap>
           <Keycap
             data-key="More"
             aria-label="Extra keys"
@@ -695,6 +952,13 @@ export function KeyboardToolbar({
           </Keycap>
         </div>
       </div>
+
+      <KeysBoardEditor
+        isOpen={editorOpen}
+        onClose={() => setEditorOpen(false)}
+        layout={activeLayout}
+        onSave={updateLayout}
+      />
     </div>
   )
 }

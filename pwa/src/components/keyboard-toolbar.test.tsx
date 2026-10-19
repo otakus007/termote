@@ -916,4 +916,76 @@ describe('KeyboardToolbar', () => {
       expect(onShiftChange).not.toHaveBeenCalled()
     })
   })
+
+  describe('2D Keys Board Grid & Editor', () => {
+    it('toggles the 7-column 2D keys board and renders cells with colSpan/rowSpan', () => {
+      renderToolbar()
+      const toggle = screen.getByRole('button', { name: 'Keys board' })
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      fireEvent.click(toggle)
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+      const grid = screen.getByTestId('keys-board-grid')
+      expect(grid).toBeInTheDocument()
+      const enterCell = grid.querySelector(
+        '[data-key-id="enter"]',
+      ) as HTMLElement
+      expect(enterCell).toHaveAttribute('data-col-span', '2')
+      expect(enterCell).toHaveAttribute('data-row-span', '1')
+    })
+
+    it('requires two taps within 2.5s for danger: true keys (^C) and disarms on timeout', () => {
+      vi.useFakeTimers()
+      try {
+        renderToolbar({ defaultBoardOpen: true })
+        const grid = screen.getByTestId('keys-board-grid')
+        const ctrlCCell = grid.querySelector(
+          '[data-key-id="ctrl-c"]',
+        ) as HTMLElement
+        expect(ctrlCCell).toHaveAttribute('data-danger', 'true')
+
+        // First tap arms the key without sending Ctrl+C
+        fireEvent.click(ctrlCCell)
+        expect(onCtrlKey).not.toHaveBeenCalled()
+        expect(ctrlCCell).toHaveAttribute('data-armed', 'true')
+        expect(ctrlCCell).toHaveTextContent('Tap again')
+
+        // Timeout after 2.5s disarms
+        act(() => {
+          vi.advanceTimersByTime(2600)
+        })
+        expect(ctrlCCell).not.toHaveAttribute('data-armed')
+
+        // Arm again and confirm within 2.5s -> sends Ctrl+C
+        fireEvent.click(ctrlCCell)
+        expect(onCtrlKey).not.toHaveBeenCalled()
+        fireEvent.click(ctrlCCell)
+        expect(onCtrlKey).toHaveBeenCalledWith('C')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('supports sticky modifiers (single-tap latch, double-tap lock) and multi-step sequences', () => {
+      vi.useFakeTimers()
+      try {
+        renderToolbar({ defaultBoardOpen: true })
+        // Switch to Prefix preset which has 2-step sequences like ^B [
+        fireEvent.click(screen.getByRole('button', { name: 'Prefix' }))
+        const grid = screen.getByTestId('keys-board-grid')
+        const copyModeCell = grid.querySelector(
+          '[data-key-id="copy-mode"]',
+        ) as HTMLElement
+        fireEvent.click(copyModeCell)
+        expect(onCtrlKey).toHaveBeenCalledWith('B')
+        expect(onSendText).not.toHaveBeenCalled()
+        act(() => {
+          vi.advanceTimersByTime(60)
+        })
+        expect(onSendText).toHaveBeenCalledWith('[')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
 })
