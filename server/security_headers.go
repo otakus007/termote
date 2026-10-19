@@ -57,6 +57,7 @@ func contentSecurityPolicy(scripts []string, host string) string {
 		"connect-src " + connect,
 		"worker-src 'self'",
 		"manifest-src 'self'",
+		"frame-src 'self' blob:",
 		"object-src 'none'",
 		"base-uri 'self'",
 		"form-action 'self'",

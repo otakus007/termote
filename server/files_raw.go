@@ -37,8 +37,9 @@ const (
 	catFileHeaderMax = 512
 
 	svgType = "image/svg+xml"
-	// svgPolicy is added to the page's own CSP for an SVG: opened directly,
-	// it runs no script and loads nothing under termote's origin.
+	pdfType = "application/pdf"
+	// svgPolicy is added to the page's own CSP for an SVG or PDF: opened
+	// directly, it runs no script and loads nothing under termote's origin.
 	svgPolicy        = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"
 	lfsPointerPrefix = "version https://git-lfs.github.com/spec/v1"
 )
@@ -46,7 +47,7 @@ const (
 var (
 	errImageTooLarge  = &codedError{"too_large", "image is larger than 10 MiB", http.StatusRequestEntityTooLarge}
 	errTooManyPixels  = &codedError{"too_many_pixels", "image has more than 40 megapixels", http.StatusRequestEntityTooLarge}
-	errNotImage       = &codedError{"not_image", "not a PNG, JPEG, GIF, WebP or SVG image", http.StatusUnsupportedMediaType}
+	errNotImage       = &codedError{"not_image", "not a PNG, JPEG, GIF, WebP, SVG or PDF file", http.StatusUnsupportedMediaType}
 	errLFSPointer     = &codedError{"lfs_pointer", "file is a Git LFS pointer", http.StatusUnsupportedMediaType}
 	errRawBusy        = &codedError{"busy", "too many images at once; try again", http.StatusTooManyRequests}
 	errNoVersion      = &codedError{"no_version", "no such version of this file", http.StatusNotFound}
@@ -63,7 +64,7 @@ func imageTypeOf(head []byte) (string, bool) {
 
 // checkImage tells the type of the image r holds, read from its bytes, and
 // leaves r at its start. path names what was read: only a .svg is taken as
-// SVG.
+// SVG and only a .pdf is taken as PDF.
 func checkImage(path string, r io.ReadSeeker) (string, error) {
 	head := make([]byte, imageSniffSize)
 	n, err := io.ReadFull(r, head)
@@ -88,11 +89,18 @@ func checkImage(path string, r io.ReadSeeker) (string, error) {
 // count, read from its header through all (the whole file from its start):
 // a GIF's frames, a WebP's first chunk.
 func imageType(path string, head []byte, all io.Reader) (string, error) {
-	if strings.EqualFold(filepath.Ext(path), ".svg") {
+	ext := filepath.Ext(path)
+	if strings.EqualFold(ext, ".svg") {
 		if !isSVG(head) {
 			return "", errNotImage
 		}
 		return svgType, nil
+	}
+	if strings.EqualFold(ext, ".pdf") {
+		if !bytes.HasPrefix(head, []byte("%PDF-")) {
+			return "", errNotImage
+		}
+		return pdfType, nil
 	}
 	mt, ok := imageTypeOf(head)
 	if !ok {
@@ -169,7 +177,7 @@ func validUTF8Head(b []byte) bool {
 	return false
 }
 
-// writeImage sends size bytes of r as an image of type ct. Headers are gone
+// writeImage sends size bytes of r as an image or PDF of type ct. Headers are gone
 // once it starts, so a short read only cuts the response (Content-Length no
 // longer matches) and is logged.
 func writeImage(w http.ResponseWriter, ct string, size int64, r io.Reader) {
@@ -179,7 +187,7 @@ func writeImage(w http.ResponseWriter, ct string, size int64, r io.Reader) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("Cross-Origin-Resource-Policy", "same-origin")
 	disposition := "inline"
-	if ct == svgType {
+	if ct == svgType || ct == pdfType {
 		// Added, not set: the browser enforces both policies.
 		h.Add("Content-Security-Policy", svgPolicy)
 		disposition = "attachment"

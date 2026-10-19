@@ -572,6 +572,7 @@ function PaneFiles({
             wrapByDefault={isMobile}
             compact={isMobile}
             anchor={tab.anchor}
+            line={tab.line}
             scrollTop={tab.scrollTop}
             tableLayout={tab.table}
             onTableLayout={(l) => f.setTableLayout(tab.id, l)}

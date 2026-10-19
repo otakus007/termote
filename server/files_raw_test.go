@@ -196,6 +196,9 @@ func TestCheckImage(t *testing.T) {
 		"gif":            {"a.gif", string(colorImage(t, "gif", color.White)), "image/gif", nil},
 		"webp":           {"a.webp", string(testImage(t, "image/webp")), "image/webp", nil},
 		"svg":            {"A.SVG", "<svg/>", svgType, nil},
+		"pdf":            {"doc.PDF", "%PDF-1.4\n%%EOF\n", pdfType, nil},
+		"pdf named png":  {"a.png", "%PDF-1.4\n", "", errNotImage},
+		"text named pdf": {"a.pdf", "hello", "", errNotImage},
 		"png named svg":  {"a.svg", string(colorImage(t, "png", color.White)), "", errNotImage},
 		"svg named png":  {"a.png", "<svg/>", "", errNotImage},
 		"html named svg": {"a.svg", "<html><svg/></html>", "", errNotImage},
@@ -277,8 +280,8 @@ func TestFilesRawWorktree(t *testing.T) {
 		}
 	}
 
-	// SVG: served as an image only with the .svg name, with a sandbox policy
-	// of its own and as an attachment.
+	// SVG and PDF: served only with their extension, with a sandbox policy
+	// of their own and as an attachment.
 	svg := "<?xml version='1.0'?>\n<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>"
 	writeFile(t, filepath.Join(fx.root, "logo.svg"), svg)
 	rec := rawGet(fx.h, url.Values{"path": {"logo.svg"}})
@@ -287,6 +290,14 @@ func TestFilesRawWorktree(t *testing.T) {
 		rec.Header().Get("Content-Disposition") != "attachment" || len(csp) != 2 || csp[1] != svgPolicy ||
 		!strings.Contains(csp[0], "script-src 'self'") {
 		t.Errorf("svg = %d %v", rec.Code, rec.Header())
+	}
+	pdf := "%PDF-1.4\n1 0 obj<<>>endobj\n%%EOF\n"
+	writeFile(t, filepath.Join(fx.root, "doc.pdf"), pdf)
+	rec = rawGet(fx.h, url.Values{"path": {"doc.pdf"}})
+	csp = rec.Header().Values("Content-Security-Policy")
+	if rec.Code != 200 || rec.Body.String() != pdf || rec.Header().Get("Content-Type") != pdfType ||
+		rec.Header().Get("Content-Disposition") != "attachment" || len(csp) != 2 || csp[1] != svgPolicy {
+		t.Errorf("pdf = %d %v", rec.Code, rec.Header())
 	}
 
 	writeFile(t, filepath.Join(fx.root, "html.svg"), "<html><script>alert(1)</script></html>")

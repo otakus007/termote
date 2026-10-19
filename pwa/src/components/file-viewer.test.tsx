@@ -1928,3 +1928,58 @@ describe('a draft found when the file is read', () => {
     ).toBeNull()
   })
 })
+
+describe('FileViewer: HTML, PDF, and line jump', () => {
+  it('previews HTML in a strictly sandboxed iframe and toggles to source', async () => {
+    mockContent.mockResolvedValue({
+      root: '/r',
+      path: 'index.html',
+      size: 32,
+      text: '<h1>Hello</h1><script>alert(1)</script>',
+      hash: 'h1',
+      editable: true,
+    })
+    show({ path: 'index.html' })
+    const frame = await screen.findByTestId('html-preview-frame')
+    expect(frame).toHaveAttribute('sandbox', '')
+    expect(frame).toHaveAttribute('referrerpolicy', 'no-referrer')
+    expect(frame).toHaveAttribute(
+      'srcdoc',
+      '<h1>Hello</h1><script>alert(1)</script>',
+    )
+    const toggle = screen.getByRole('button', { name: 'Preview' })
+    expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(toggle)
+    expect(await screen.findByTestId('code-block')).toBeInTheDocument()
+  })
+
+  it('previews a PDF file via raw blob URL', async () => {
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: () => 'blob:mock-pdf',
+      revokeObjectURL: () => {},
+    })
+    mockImage.mockResolvedValue(
+      new Blob(['%PDF-1.7'], { type: 'application/pdf' }),
+    )
+    show({ path: 'docs/spec.pdf' })
+    const frame = await screen.findByTestId('pdf-preview-frame')
+    expect(frame).toHaveAttribute('src', 'blob:mock-pdf')
+  })
+
+  it('highlights and scrolls to target line when opened with line prop', async () => {
+    mockContent.mockResolvedValue({
+      root: '/r',
+      path: 'src/a.ts',
+      size: 20,
+      text: 'line1\nline2\nline3\n',
+      hash: 'h1',
+      editable: true,
+    })
+    show({ path: 'src/a.ts', line: 2 })
+    const block = await screen.findByTestId('code-block')
+    const highlighted = block.querySelector('[data-highlighted-line="true"]')
+    expect(highlighted).not.toBeNull()
+    expect(highlighted).toHaveAttribute('data-line', '2')
+  })
+})

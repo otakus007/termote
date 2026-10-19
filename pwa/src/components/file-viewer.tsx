@@ -48,7 +48,12 @@ import { CsvClient } from '../utils/csv-parse-client'
 import { formatSize, keepOrder, TRUNCATE_START } from '../utils/files-format'
 import { HIGHLIGHT_MAX_BYTES } from '../utils/highlight'
 import { isImagePath, isSvgPath } from '../utils/image-path'
-import { isMarkdownPath, type LinkPath } from '../utils/markdown-links'
+import {
+  isHtmlPath,
+  isMarkdownPath,
+  isPdfPath,
+  type LinkPath,
+} from '../utils/markdown-links'
 import type { TableLayout } from '../utils/table-columns'
 import { visibleUnsafe } from '../utils/unsafe-chars'
 import { CodeBlock } from './code-block'
@@ -236,8 +241,9 @@ interface Props {
   path: string
   // Wrap long lines at first (mobile)
   wrapByDefault: boolean
-  // Where a Markdown preview starts: a heading, else an offset to restore
+  // Where a Markdown preview starts: a heading, 1-based line, else an offset to restore
   anchor?: string
+  line?: number
   scrollTop?: number
   // A CSV/TSV table's widths and wrapped columns this tab kept, and where
   // to keep them when they change
@@ -318,6 +324,7 @@ export function FileViewer({
   path,
   wrapByDefault,
   anchor,
+  line,
   scrollTop,
   tableLayout,
   onTableLayout,
@@ -375,9 +382,12 @@ export function FileViewer({
   // Markdown that can be previewed: the choice (remembered on this device)
   // says how it shows
   const markdown = isMarkdownPath(path)
+  const html = isHtmlPath(path)
   const tooLarge = state.kind === 'text' && state.size > PREVIEW_MAX_BYTES
   const canPreview = markdown && state.kind === 'text' && !tooLarge
   const preview = canPreview && settings.markdownPreview
+  const canHtml = html && state.kind === 'text' && !tooLarge
+  const htmlView = canHtml && settings.htmlPreview !== false
   // Where the preview started (the link's heading, the offset Back restored)
   // is used up once the user leaves it: Source then Preview starts at the top
   const [leftPreview, setLeftPreview] = useState(false)
@@ -391,26 +401,33 @@ export function FileViewer({
       updateSetting('tablePreview', !tableView)
       return
     }
+    if (canHtml) {
+      scrolled.current = undefined
+      updateSetting('htmlPreview', !htmlView)
+      return
+    }
     if (preview) setLeftPreview(true)
     // The other view of the file is laid out otherwise: from the top
     scrolled.current = undefined
     updateSetting('markdownPreview', !preview)
   }
-  const previewOn = preview || tableView
-  // An image (or an SVG the user wants as one) is read through files/raw
+  const previewOn = preview || tableView || htmlView
+  // An image, PDF, or an SVG the user wants as an image is read through files/raw
   const svg = isSvgPath(path)
+  const isPdf = isPdfPath(path)
   const asImage = isImagePath(path) || (svg && settings.svgPreview)
+  const asRaw = asImage || isPdf
   const [retry, setRetry] = useState(0)
   const image = useImageBlob(
     paneId,
-    asImage ? { path, root, reveal } : null,
+    asRaw ? { path, root, reveal } : null,
     String(retry),
     onRootChanged,
   )
-  const sensitive = asImage
+  const sensitive = asRaw
     ? imageErrorCode(image) === 'sensitive'
     : state.kind === 'sensitive'
-  const size = asImage
+  const size = asRaw
     ? image.status === 'ready'
       ? image.size
       : undefined
@@ -433,13 +450,13 @@ export function FileViewer({
   const cells = mine?.cells
   // The file as read, when a save of it would be taken
   const editable =
-    canEdit && !asImage && state.kind === 'text' && state.editable
+    canEdit && !asRaw && state.kind === 'text' && state.editable
       ? state
       : undefined
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reload reads the file again
   useEffect(() => {
-    if (asImage) return
+    if (asRaw) return
     let live = true
     setState({ kind: 'loading' })
     fetchFileContent(paneId, path, { root, reveal }).then(
@@ -462,7 +479,7 @@ export function FileViewer({
     return () => {
       live = false
     }
-  }, [paneId, root, path, reveal, asImage, onRootChanged, reload])
+  }, [paneId, root, path, reveal, asRaw, onRootChanged, reload])
 
   // A draft found when the file is read (one kept from before the app
   // closed, or from before a remount) is checked against the file: one the
@@ -696,7 +713,7 @@ export function FileViewer({
       icon: <Copy size={15} />,
       onClick: copyPath,
     })
-  if (!mine && (canPreview || canTable))
+  if (!mine && (canPreview || canTable || canHtml))
     extras.push({
       label: 'Preview',
       title: previewOn ? 'Show the source' : 'Show the preview',
@@ -712,7 +729,7 @@ export function FileViewer({
       pressed: asImage,
       onClick: () => updateSetting('svgPreview', !asImage),
     })
-  if (!asImage)
+  if (!asRaw)
     extras.push({
       label: 'Wrap lines',
       icon: <WrapText size={15} />,
@@ -839,7 +856,7 @@ export function FileViewer({
         {headerExtra}
       </div>
       {mine &&
-        !asImage &&
+        !asRaw &&
         state.kind === 'error' &&
         state.error === 'not-found' && (
           // The file of a draft is gone from the host (deleted or renamed
@@ -889,7 +906,25 @@ export function FileViewer({
           />
         </div>
       )}
-      {!mine && !asImage && state.kind === 'text' && preview && (
+      {!mine && isPdf && !sensitive && (
+        <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+          {image.status === 'ready' ? (
+            <iframe
+              data-testid="pdf-preview-frame"
+              title={`PDF preview of ${path}`}
+              src={image.url}
+              className="min-h-0 w-full flex-1 border-0"
+            />
+          ) : (
+            <ImagePreview
+              state={image}
+              alt={path}
+              onRetry={() => setRetry((n) => n + 1)}
+            />
+          )}
+        </div>
+      )}
+      {!mine && !asRaw && state.kind === 'text' && preview && (
         <LazyMarkdownPreview
           text={state.text}
           path={path}
@@ -898,6 +933,16 @@ export function FileViewer({
           scrollTop={scrolled.current}
           onFollow={onFollow}
           notify={notify}
+        />
+      )}
+      {!mine && !asRaw && state.kind === 'text' && htmlView && (
+        <iframe
+          data-testid="html-preview-frame"
+          title={`Preview of ${path}`}
+          sandbox=""
+          referrerPolicy="no-referrer"
+          srcDoc={state.text}
+          className="min-h-0 w-full flex-1 border-0 bg-white"
         />
       )}
       {cells && (
@@ -914,7 +959,7 @@ export function FileViewer({
       )}
       {/* One element for viewing and editing, so entering edits keeps the
           view's sort, filter and header row */}
-      {(cells || (!mine && !asImage && tableView)) && (
+      {(cells || (!mine && !asRaw && tableView)) && (
         <LazyTablePreview
           text={cells ? mine.text : (state as TextLoaded).text}
           path={path}
@@ -948,9 +993,9 @@ export function FileViewer({
           }
         />
       )}
-      {!mine && !asImage && state.kind === 'text' && !previewOn && (
+      {!mine && !asRaw && state.kind === 'text' && !previewOn && (
         <>
-          {markdown && tooLarge && (
+          {(markdown || html) && tooLarge && (
             <Banner>Too large to preview: shown as source</Banner>
           )}
           <CodeBlock
@@ -958,18 +1003,19 @@ export function FileViewer({
             path={path}
             wrap={wrap}
             scrollTop={scrolled.current}
+            line={line}
           />
         </>
       )}
-      {!mine && !asImage && state.kind === 'loading' && (
+      {!mine && !asRaw && state.kind === 'loading' && (
         <ViewMessage>Loading…</ViewMessage>
       )}
-      {!mine && !asImage && state.kind === 'unpreviewable' && (
+      {!mine && !asRaw && state.kind === 'unpreviewable' && (
         <ViewMessage>
           Not previewable (binary, special file or larger than 1 MiB)
         </ViewMessage>
       )}
-      {!mine && !asImage && state.kind === 'error' && (
+      {!mine && !asRaw && state.kind === 'error' && (
         <ViewMessage>
           {ERRORS[state.error]}
           {state.error === 'not-found' && onCloseTab && (

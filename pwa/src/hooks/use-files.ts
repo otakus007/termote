@@ -74,8 +74,9 @@ export interface FileTab extends TabBase {
   // The root the file was opened under
   root: string
   path: string
-  // Where the file starts: a heading, or the offset it was left at
+  // Where the file starts: a heading, a 1-based line number, or the offset it was left at
   anchor?: string
+  line?: number
   scrollTop?: number
   // A CSV/TSV table's column widths and wrapped columns, with the scroll
   // offset they were left at; another path starts over
@@ -124,8 +125,9 @@ export const activeTab = (s: FilesState) =>
 export interface FileOpenOptions {
   // A tab of its own, kept until closed (else the preview tab)
   pin?: boolean
-  // Where the file starts: a heading
+  // Where the file starts: a heading or 1-based line number
   anchor?: string
+  line?: number
 }
 
 export interface FollowOptions {
@@ -296,6 +298,7 @@ function createStore(id: string): Store {
         root: state.root ?? '',
         path,
         anchor: opts.anchor,
+        line: opts.line,
         history: [],
         reveal: false,
       }),
@@ -307,14 +310,20 @@ function createStore(id: string): Store {
     // theirs goes with them, so the file is read again when it reopens
     for (const t of r.closed) dropDraft(paneId, t.path)
     const gone = new Set(r.closed.map((t) => t.id))
-    // A file already open goes to the heading asked for
-    const tabs = opts.anchor
-      ? r.tabs.map((t) =>
-          t.id === r.activeId
-            ? { ...t, anchor: opts.anchor, scrollTop: undefined }
-            : t,
-        )
-      : r.tabs
+    // A file already open goes to the heading or line asked for
+    const tabs =
+      opts.anchor || opts.line !== undefined
+        ? r.tabs.map((t) =>
+            t.id === r.activeId
+              ? {
+                  ...t,
+                  anchor: opts.anchor,
+                  line: opts.line,
+                  scrollTop: undefined,
+                }
+              : t,
+          )
+        : r.tabs
     set({
       tabs,
       activeId: r.activeId,
@@ -443,13 +452,18 @@ function createStore(id: string): Store {
       (t) => t.path === target.path && t !== current,
     )
     if (opts.newTab || opts.fresh || elsewhere || !current) {
-      open(target.path, { pin: opts.newTab, anchor: target.anchor })
+      open(target.path, {
+        pin: opts.newTab,
+        anchor: target.anchor,
+        line: target.line,
+      })
       return 'opened'
     }
     // On in the same tab, which remembers where it was
     patchTab(current.id, {
       path: target.path,
       anchor: target.anchor,
+      line: target.line,
       scrollTop: undefined,
       table: undefined,
       reveal: false,
@@ -642,6 +656,7 @@ function createStore(id: string): Store {
       patchTab(tab.id, {
         path: prev.path,
         anchor: undefined,
+        line: undefined,
         scrollTop: prev.scrollTop,
         table: undefined,
         reveal: false,
@@ -653,8 +668,9 @@ function createStore(id: string): Store {
       const tab = state.tabs.find((t) => t.id === id)
       if (!tab) return
       tab.scrollTop = top
-      // Scrolled away from the heading it opened at: shown again here
+      // Scrolled away from the heading or line it opened at: shown again here
       tab.anchor = undefined
+      tab.line = undefined
       persist()
     },
     setTableLayout(id, layout) {
