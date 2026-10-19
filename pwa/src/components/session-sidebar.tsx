@@ -1206,12 +1206,6 @@ export function SessionSidebar({
 
   // Desktop: collapsible sidebar
   if (isCollapsed) {
-    // Sorted within each group, as in the expanded list.
-    const railSessions = showGroups
-      ? filteredGroups.flatMap((g) =>
-          arrange(sessions.filter((s) => s.groupId === g.id)),
-        )
-      : visibleSessions
     return (
       <aside className={`w-14 ${SIDEBAR_BASE_CLASSES}`}>
         <div
