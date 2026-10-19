@@ -166,6 +166,29 @@ describe('SelectTextSheet', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close' }))
     expect(onClose).toHaveBeenCalled()
   })
+
+  it('linkifies workspace file paths when onOpenFile is provided', () => {
+    setState({ text: 'Error at server/push_watch.go:42 in build' })
+    const onOpenFile = vi.fn()
+    render(
+      <SelectTextSheet
+        onClose={vi.fn()}
+        paneId="0"
+        useServer
+        readBuffer={() => ''}
+        onCopied={vi.fn()}
+        onOpenFile={onOpenFile}
+      />,
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: 'server/push_watch.go:42' }),
+    )
+    expect(onOpenFile).toHaveBeenCalledWith({
+      path: 'server/push_watch.go',
+      line: 42,
+      col: undefined,
+    })
+  })
 })
 
 describe('rangeText', () => {

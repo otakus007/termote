@@ -59,6 +59,18 @@ export interface MuxGroup {
   name: string
   tabs: MuxTab[]
   worktree?: MuxGroupWorktree
+  machineId?: string
+  machineName?: string
+}
+
+export interface CrewMemberStatus {
+  id: string
+  name: string
+  url?: string
+  role: 'lead' | 'deputy' | 'member'
+  status: 'online' | 'unreachable'
+  latencyMs: number
+  lastSeen?: string
 }
 
 export interface MuxSnapshot {
@@ -114,6 +126,8 @@ export interface MuxSnapshot {
     // View-only role: the backend can stream a pane to it (tmux 3.2 or
     // later, Herdr); off, the stream is refused.
     viewStream?: boolean
+    // The server samples host resources and serves /api/mux/machine*.
+    machine?: boolean
   }
   groups: MuxGroup[]
   // The server's time when it answered (RFC 3339), for the client's clock
@@ -122,6 +136,8 @@ export interface MuxSnapshot {
   // Names this server (kept in its state dir): what the PWA keeps on the
   // device for a pane is stored under it. Absent from an older server.
   instanceId?: string
+  // Multi-machine crew members when this server leads a crew.
+  crewMembers?: CrewMemberStatus[]
 }
 
 // State-changing calls always send JSON: the server rejects any other
@@ -186,9 +202,15 @@ const openSignIn = (url: string) => window.location.assign(url)
 
 // The snapshot is polled and the health read on load, so a session that
 // ended is noticed within one poll.
-export async function fetchSnapshot(signIn = openSignIn): Promise<MuxSnapshot> {
+export async function fetchSnapshot(
+  signIn = openSignIn,
+  viewingPaneId?: string,
+): Promise<MuxSnapshot> {
+  const query = viewingPaneId
+    ? `?viewing=${encodeURIComponent(viewingPaneId)}`
+    : ''
   return readJSON(
-    await fetch(`${API_BASE}/snapshot`, {
+    await fetch(`${API_BASE}/snapshot${query}`, {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     }),
     signIn,
@@ -259,6 +281,21 @@ export interface OverviewAccount {
   updatedAt: string
 }
 
+export interface AgentCacheInfo {
+  state: 'warm' | 'cooling' | 'cold' | 'busted' | 'unknown'
+  lastTouchAt?: string
+  ttlSec?: number
+  bustReason?: string
+  reason?: string
+  minutesRemain?: number
+  windowMinutes?: number
+  hitRate?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  inputTokens?: number
+  lastActivityTs?: string
+}
+
 // One overview card's data beyond the snapshot. lastTs: when the agent last
 // wrote (server time). usage: how full its context is. accountKey: the
 // Codex account it uses. unavailable: what could not be read this time
@@ -272,8 +309,11 @@ export interface OverviewPane {
   changed?: number
   changedTruncated?: boolean
   usage?: OverviewUsage
+  cache?: AgentCacheInfo
   accountKey?: string
   unavailable?: string[]
+  machineId?: string
+  machineName?: string
 }
 
 export interface Overview {
@@ -397,6 +437,111 @@ export function unsubscribePush(
   signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 ): Promise<void> {
   return pushWrite('DELETE', { endpoint }, signal)
+}
+
+export interface NotifyCategories {
+  blocked: boolean
+  done: boolean
+  update: boolean
+  cacheCold: boolean
+  machineLoad: boolean
+}
+
+export interface TelegramStatus {
+  configured: boolean
+  enabled: boolean
+  chatIdTail: string
+}
+
+export interface NotifyConfig {
+  blockedSettleSec: number
+  doneSettleSec: number
+  cooldownSec: number
+  skipWhileViewing: boolean
+  mutedUntil?: string
+  categories: NotifyCategories
+  publicUrl: string
+  telegram: TelegramStatus
+}
+
+export interface NotifyConfigUpdate {
+  blockedSettleSec?: number
+  doneSettleSec?: number
+  cooldownSec?: number
+  skipWhileViewing?: boolean
+  mutedUntil?: string
+  categories?: Partial<NotifyCategories>
+  publicUrl?: string
+}
+
+export async function fetchNotifyConfig(
+  signal?: AbortSignal,
+): Promise<NotifyConfig> {
+  const res = await fetch(`${API_BASE}/notify/config`, {
+    signal: signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) throw await requestError(res)
+  return res.json()
+}
+
+export async function updateNotifyConfig(
+  upd: NotifyConfigUpdate,
+): Promise<NotifyConfig> {
+  const res = await fetch(`${API_BASE}/notify/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(upd),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) throw await requestError(res)
+  return res.json()
+}
+
+export async function setNotifyMute(durationMinutes: number): Promise<string> {
+  const res = await fetch(`${API_BASE}/notify/mute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ durationMinutes }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) throw await requestError(res)
+  const body = await res.json()
+  return typeof body.mutedUntil === 'string' ? body.mutedUntil : ''
+}
+
+export async function updateTelegramConfig(req: {
+  botToken?: string
+  chatId?: string
+  enabled?: boolean
+}): Promise<TelegramStatus> {
+  const res = await fetch(`${API_BASE}/notify/telegram`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) throw await requestError(res)
+  return res.json()
+}
+
+export async function deleteTelegramConfig(): Promise<void> {
+  const res = await fetch(`${API_BASE}/notify/telegram`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) throw await requestError(res)
+}
+
+export async function testTelegramNotification(): Promise<void> {
+  const res = await fetch(`${API_BASE}/notify/telegram/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) throw await requestError(res)
 }
 
 export async function selectTab(id: string): Promise<boolean> {
@@ -829,19 +974,143 @@ export async function sendAgentMessage(
   text: string,
   cursor: string,
   images: string[] = [],
+  sendNow = false,
 ): Promise<void> {
+  const payload: Record<string, unknown> = { text, cursor }
+  if (images.length > 0) payload.images = images
+  if (sendNow) payload.sendNow = true
   const res = await fetch(agentPath(paneId, 'message'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(
-      images.length > 0 ? { text, cursor, images } : { text, cursor },
-    ),
+    body: JSON.stringify(payload),
   })
   if (!res.ok) throw await requestError(res)
 }
 
+// Acknowledges a done agent locally (folds done -> idle until next activity).
+export async function ackAgent(paneId: string): Promise<boolean> {
+  const res = await fetch(agentPath(paneId, 'ack'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) throw await requestError(res)
+  const data = await res.json().catch(() => ({}))
+  return data.acked === true
+}
+
 // The agents a pane can start, with the arguments the server picks.
-export type StartAgentKind = 'claude' | 'codex'
+export type StartAgentKind =
+  | 'claude'
+  | 'codex'
+  | 'opencode'
+  | 'pi'
+  | 'omp'
+  | 'gemini'
+  | 'antigravity'
+  | 'cursor'
+  | 'grok'
+  | 'hermes'
+  | 'openclaw'
+
+export interface LaunchOption {
+  id?: string
+  label: string
+  flag: string
+  description?: string
+  noPrompts?: boolean
+}
+
+export type LaunchOptionChip = LaunchOption
+
+export interface AgentHarnessInfo {
+  name: StartAgentKind
+  label: string
+  command?: string
+  binaries: string[]
+  transcript?: boolean
+  supportsChat?: boolean
+  supportsTranscript?: boolean
+  supportsStart?: boolean
+  supportsHooks?: boolean
+  options?: LaunchOption[]
+}
+
+export interface LauncherRecipe {
+  id: string
+  name: string
+  harness?: StartAgentKind
+  command?: string
+  options?: string[]
+  updatedAt?: string
+}
+
+export interface RecentCommandEntry {
+  harness: StartAgentKind
+  options?: string[]
+  recipeId?: string
+  command: string
+  usedAt: string
+  count: number
+}
+
+export interface FolderEntry {
+  path: string
+  label?: string
+  favourite?: boolean
+  usedAt?: string
+  count?: number
+}
+
+export interface FoldersData {
+  favourites: string[]
+  recents?: string[]
+  recent?: string[]
+}
+
+export interface LaunchersResponse {
+  harnesses?: AgentHarnessInfo[]
+  recipes?: LauncherRecipe[]
+  launchers?: LauncherRecipe[]
+  recentCommands: (string | RecentCommandEntry)[]
+  folders?: FoldersData
+}
+
+export async function fetchLaunchers(): Promise<LaunchersResponse> {
+  const res = await fetch(`${API_BASE}/launchers`, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) throw await requestError(res, true)
+  return res.json()
+}
+
+export async function updateLaunchers(body: {
+  recipes?: LauncherRecipe[]
+  recipe?: LauncherRecipe
+  deleteRecipeId?: string
+  recentCommand?: string
+  folders?: FoldersData
+  toggleFavouriteFolder?: string
+  recentFolder?: string
+  clearRecentCommands?: boolean
+}): Promise<LaunchersResponse> {
+  const res = await fetch(`${API_BASE}/launchers`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) throw await requestError(res)
+  return res.json()
+}
+
+export interface StartAgentOptionsPayload {
+  harness?: StartAgentKind | string
+  recipeId?: string
+  options?: string[]
+  command?: string
+}
 
 // How a start goes: starting until the agent is ready for a message, asks
 // something first (blocked), ends (exited) or never gets ready (timeout).
@@ -862,11 +1131,16 @@ export const START_REQUEST_TIMEOUT_MS = 30_000
 export async function startAgent(
   paneId: string,
   kind: StartAgentKind,
+  opts?: StartAgentOptionsPayload,
 ): Promise<void> {
+  const payload: Record<string, unknown> = { kind }
+  if (opts?.harness) payload.harness = opts.harness
+  if (opts?.recipeId) payload.recipeId = opts.recipeId
+  if (opts?.options?.length) payload.options = opts.options
   const res = await fetch(agentPath(paneId, 'start'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ kind }),
+    body: JSON.stringify(payload),
     signal: AbortSignal.timeout(START_REQUEST_TIMEOUT_MS),
   })
   if (!res.ok) throw await requestError(res)
@@ -1553,4 +1827,98 @@ export async function revokeDevice(id: string): Promise<string[]> {
   if (!res.ok) throw await requestError(res)
   const body = await res.json().catch(() => ({}))
   return Array.isArray(body.revoked) ? body.revoked : [id]
+}
+
+export interface MachineHostInfo {
+  id: string
+  name: string
+  os: string
+  arch: string
+  cpus: number
+  uptimeSec: number
+}
+
+export interface MachineDiskStat {
+  mount: string
+  usedBytes: number
+  totalBytes: number
+  usedPct: number
+}
+
+export interface MachineSample {
+  ts: string
+  cpuPct: number
+  memUsedBytes: number
+  memTotalBytes: number
+  memPct: number
+  load1: number
+  load5: number
+  load15: number
+  rxBytesPerSec: number
+  txBytesPerSec: number
+  disks: MachineDiskStat[]
+}
+
+export interface MachineAlertRule {
+  id: string
+  metric: 'cpu' | 'memory' | 'disk'
+  thresholdPct: number
+  durationMin: number
+  enabled: boolean
+  firing?: boolean
+}
+
+export interface MachineNodeStatus {
+  id: string
+  name: string
+  role: 'lead' | 'deputy' | 'member'
+  status: 'online' | 'unreachable'
+  latencyMs: number
+  host?: MachineHostInfo
+  current?: MachineSample
+  samples?: MachineSample[]
+  alerts?: MachineAlertRule[]
+}
+
+export interface MachineStatusResponse {
+  host: MachineHostInfo
+  current: MachineSample
+  samples: MachineSample[]
+  alerts: MachineAlertRule[]
+  machines?: MachineNodeStatus[]
+}
+
+// Reads the host's current resource snapshot, 1h or 24h ring buffer samples,
+// and sustained high-load alert rules.
+export async function fetchMachineStatus(
+  range: '1h' | '24h' = '1h',
+  signal?: AbortSignal,
+  machineId?: string,
+): Promise<MachineStatusResponse> {
+  const machineQuery = machineId
+    ? `&machine=${encodeURIComponent(machineId)}`
+    : ''
+  const res = await fetch(
+    `${API_BASE}/machine?range=${encodeURIComponent(range)}${machineQuery}`,
+    {
+      signal: signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    },
+  )
+  if (!res.ok) throw await requestError(res)
+  return res.json()
+}
+
+// Replaces the sustained high-load alert rules in <stateDir>/machine/machine-alerts.json.
+export async function updateMachineAlerts(
+  alerts: MachineAlertRule[],
+): Promise<MachineAlertRule[]> {
+  const res = await fetch(`${API_BASE}/machine/alerts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ alerts }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) throw await requestError(res)
+  const body = await res.json().catch(() => ({}))
+  return Array.isArray(body.alerts) ? body.alerts : alerts
 }

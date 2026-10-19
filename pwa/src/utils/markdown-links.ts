@@ -6,10 +6,122 @@ import { safeUrl } from './markdown-safety'
 export const isMarkdownPath = (path: string) =>
   /\.(md|markdown|mdx)$/i.test(path)
 
-// A file (or directory) under the pane's root, and the heading to show
+export const isHtmlPath = (path: string) => /\.html?$/i.test(path)
+
+export const isPdfPath = (path: string) => /\.pdf$/i.test(path)
+
+// A file (or directory) under the pane's root, and the heading or line to show
 export interface LinkPath {
   path: string
   anchor?: string
+  line?: number
+  col?: number
+}
+
+const FILE_EXTS = new Set([
+  'go',
+  'ts',
+  'tsx',
+  'js',
+  'jsx',
+  'mjs',
+  'cjs',
+  'json',
+  'md',
+  'markdown',
+  'mdx',
+  'html',
+  'htm',
+  'pdf',
+  'css',
+  'scss',
+  'py',
+  'rs',
+  'sh',
+  'bash',
+  'zsh',
+  'yaml',
+  'yml',
+  'toml',
+  'sql',
+  'txt',
+  'xml',
+  'svg',
+  'proto',
+  'env',
+  'conf',
+  'ini',
+  'c',
+  'cc',
+  'cpp',
+  'h',
+  'hpp',
+  'java',
+  'kt',
+  'rb',
+  'php',
+  'swift',
+  'dart',
+  'vue',
+  'svelte',
+])
+
+const FILE_TOKEN_RE =
+  /^(?:\.\/|\/)?([A-Za-z0-9._/-]+\.([A-Za-z0-9]+))(?::([1-9]\d*)(?::([1-9]\d*))?)?$/
+
+// Parses a workspace-relative file token like "server/push_watch.go:42:5" or
+// "docs/guide.md" into a safe root-relative LinkPath, or null if invalid.
+export function parseFilePathToken(token: string): LinkPath | null {
+  if (!token || token.includes('://') || token.startsWith('//')) return null
+  if (token.includes('\\') || /[\s\0]/.test(token)) return null
+  const m = token.match(FILE_TOKEN_RE)
+  if (!m) return null
+  const [, rawPath, ext, rawLine, rawCol] = m
+  if (!FILE_EXTS.has(ext.toLowerCase())) return null
+  const parts: string[] = []
+  for (const seg of rawPath.split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') {
+      if (parts.length === 0) return null
+      parts.pop()
+    } else {
+      parts.push(seg)
+    }
+  }
+  if (parts.length === 0) return null
+  const result: LinkPath = { path: parts.join('/') }
+  if (rawLine) result.line = Number.parseInt(rawLine, 10)
+  if (rawCol) result.col = Number.parseInt(rawCol, 10)
+  return result
+}
+
+export type TextFileSegment =
+  | { type: 'text'; value: string }
+  | ({ type: 'path'; raw: string } & LinkPath)
+
+const TEXT_PATH_SCAN_RE =
+  /(?<![A-Za-z0-9_/:@.-])((?:\.\/)?(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+\.[A-Za-z0-9]+(?::[1-9]\d*(?::[1-9]\d*)?)?|[A-Za-z0-9._-]+\.[A-Za-z0-9]+:[1-9]\d*(?::[1-9]\d*)?)/g
+
+// Splits plain text into literal text and workspace file path tokens.
+export function splitTextFilePaths(text: string): TextFileSegment[] {
+  if (!text) return []
+  const out: TextFileSegment[] = []
+  let last = 0
+  for (const match of text.matchAll(TEXT_PATH_SCAN_RE)) {
+    const raw = match[1]
+    const index = match.index ?? 0
+    const parsed = parseFilePathToken(raw)
+    if (!parsed) continue
+    if (index > last) {
+      out.push({ type: 'text', value: text.slice(last, index) })
+    }
+    out.push({ type: 'path', raw, ...parsed })
+    last = index + raw.length
+  }
+  if (last < text.length) {
+    out.push({ type: 'text', value: text.slice(last) })
+  }
+  return out
 }
 
 export type LinkTarget =

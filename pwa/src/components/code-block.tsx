@@ -52,22 +52,33 @@ interface Props {
   // Picks the language
   path: string
   wrap: boolean
-  // Where it starts scrolled to (a tab shown again)
+  // Where it starts scrolled to (a tab shown again) or 1-based line number
   scrollTop?: number
+  line?: number
 }
 
 // A text file with line numbers, highlighted once the worker answers; plain
 // until then and whenever it does not.
-export function CodeBlock({ text, path, wrap, scrollTop }: Props) {
+export function CodeBlock({ text, path, wrap, scrollTop, line }: Props) {
   const { resolvedTheme } = useTheme()
   const lines = useMemo(() => splitLines(text), [text])
   const [tokens, setTokens] = useState<Token[][] | null>(null)
   const frame = useRef<HTMLDivElement>(null)
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: only where it opens
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only where it opens or when target line changes
   useLayoutEffect(() => {
-    if (scrollTop && frame.current) frame.current.scrollTop = scrollTop
-  }, [])
+    if (!frame.current) return
+    if (line && line > 0) {
+      const row = frame.current.querySelector<HTMLElement>(
+        `[data-line="${line}"]`,
+      )
+      if (row) {
+        row.scrollIntoView?.({ block: 'center' })
+        return
+      }
+    }
+    if (scrollTop) frame.current.scrollTop = scrollTop
+  }, [line])
 
   useEffect(() => {
     let live = true
@@ -89,9 +100,11 @@ export function CodeBlock({ text, path, wrap, scrollTop }: Props) {
       data-scroll-restore
     >
       <div className={wrap ? '' : 'w-max min-w-full'}>
-        {lines.map((line, i) => {
+        {lines.map((lineText, i) => {
+          const lineNum = i + 1
+          const activeLine = line === lineNum
           const parts = tokens?.[i]
-          let content: ReactNode = line
+          let content: ReactNode = lineText
           if (parts) {
             content = parts.map((t, j) => (
               // biome-ignore lint/suspicious/noArrayIndexKey: tokens of one line never move
@@ -101,14 +114,19 @@ export function CodeBlock({ text, path, wrap, scrollTop }: Props) {
             ))
           }
           return (
-            // biome-ignore lint/suspicious/noArrayIndexKey: a line is its number
-            <div key={i} className="flex bg-bg">
+            <div
+              // biome-ignore lint/suspicious/noArrayIndexKey: a line is its number
+              key={i}
+              data-line={lineNum}
+              data-highlighted-line={activeLine ? 'true' : undefined}
+              className={`flex ${activeLine ? 'bg-accent/15' : 'bg-bg'}`}
+            >
               <span
                 aria-hidden="true"
-                className={`${GUTTER} text-fg-subtle`}
+                className={`${GUTTER} ${activeLine ? 'font-semibold text-accent' : 'text-fg-subtle'}`}
                 style={{ minWidth: gutter }}
               >
-                {i + 1}
+                {lineNum}
               </span>
               <code className={codeText(wrap)}>{content || ' '}</code>
             </div>

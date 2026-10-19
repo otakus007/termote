@@ -3,6 +3,12 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useActivityLog } from '../hooks/use-activity-log'
 import { useAgentOverview } from '../hooks/use-agent-overview'
 import { useMediaQuery } from '../hooks/use-media-query'
+import {
+  ackAgent,
+  type CrewMemberStatus,
+  fetchMachineStatus,
+  type MachineStatusResponse,
+} from '../hooks/use-mux-api'
 import type { Session, SessionGroup, SessionPane } from '../types/session'
 import { stuckFor } from '../utils/agent-stuck'
 import { overviewOrder } from '../utils/overview-order'
@@ -17,9 +23,10 @@ import { AccountUsageStrip } from './account-usage-strip'
 import { ActivityLog } from './activity-log'
 import { AgentCard } from './agent-card'
 import { AgentFilterBar } from './agent-filter-bar'
+import { HostResourcePill, MachinesView } from './machines-view'
 import { NeedsMeQueue } from './needs-me-queue'
 import { SearchToggle, SessionSearchField } from './session-search-field'
-import { Button, IconButton } from './ui/button'
+import { Button, FOCUS_RING, IconButton } from './ui/button'
 import { Sheet } from './ui/sheet'
 
 // The card's time is a coarse "3 min ago": a tick every 30 s keeps it right
@@ -50,6 +57,8 @@ export function agentCards(sessions: Session[]): OverviewCard[] {
 interface Props {
   sessions: Session[]
   groups: SessionGroup[]
+  // Multi-machine crew members when operating in crew federation mode
+  crewMembers?: readonly CrewMemberStatus[]
   // What a group is called here ("workspace", "tmux session")
   groupNoun: string
   // The first snapshot is in: until then nothing says "no agent"
@@ -79,6 +88,11 @@ interface Props {
   // The pane whose card takes focus (the header's usage chip); a new
   // object asks again
   focusPane?: { paneId: string }
+  // Pinned pane keys (sessionPaneKey or pane.id) sorted to the top
+  pinnedPanes?: readonly string[]
+  onTogglePin?: (paneKey: string) => void
+  // Host resource telemetry (/api/mux/machine) is available on the server
+  machineEnabled?: boolean
 }
 
 // Every agent the server sees, in every group: those waiting on the user
@@ -87,6 +101,7 @@ interface Props {
 export function OverviewScreen({
   sessions,
   groups,
+  crewMembers,
   groupNoun,
   ready,
   pollInterval,
@@ -100,12 +115,33 @@ export function OverviewScreen({
   onClose,
   onStartAgent,
   focusPane,
+  pinnedPanes,
+  onTogglePin,
+  machineEnabled = false,
 }: Props) {
   const overview = useAgentOverview(pollInterval)
   const activity = useActivityLog(pollInterval)
   // The activity log: a column beside the cards on a wide screen, a sheet
   // anywhere else.
   const [logOpen, setLogOpen] = useState(false)
+  const [machinesOpen, setMachinesOpen] = useState(false)
+  const [machineStatus, setMachineStatus] =
+    useState<MachineStatusResponse | null>(null)
+  useEffect(() => {
+    if (!machineEnabled) return
+    const ctrl = new AbortController()
+    const poll = () => {
+      void fetchMachineStatus('1h', ctrl.signal)
+        .then((res) => setMachineStatus(res))
+        .catch(() => {})
+    }
+    poll()
+    const id = setInterval(poll, 60_000)
+    return () => {
+      ctrl.abort()
+      clearInterval(id)
+    }
+  }, [machineEnabled])
   const wide = useMediaQuery('(min-width: 1280px)')
   // Focus moves into the overview and back to where it was when it closes.
   const titleRef = useRef<HTMLHeadingElement>(null)
@@ -117,6 +153,7 @@ export function OverviewScreen({
     }
   }, [])
   const [filter, setFilter] = useState<SidebarFilter>('all')
+  const [machineFilter, setMachineFilter] = useState<string>('all')
   // The search box: the cards only, not the queue or the activity log
   const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -136,14 +173,80 @@ export function OverviewScreen({
     return () => clearInterval(id)
   }, [clockOffset])
 
-  const cards = useMemo(() => overviewOrder(agentCards(sessions)), [sessions])
-  const summary = useMemo(
-    () => summarizePanes(cards.map((c) => c.pane)),
-    [cards],
-  )
   const groupOf = useMemo(() => new Map(groups.map((g) => [g.id, g])), [groups])
+
+  const machineChips = useMemo<CrewMemberStatus[]>(() => {
+    const seen = new Map<string, CrewMemberStatus>()
+    for (const g of groups) {
+      if (!g.machineId) continue
+      if (!seen.has(g.machineId)) {
+        seen.set(g.machineId, {
+          id: g.machineId,
+          name: g.machineName || g.machineId,
+          role: g.machineId === 'local' ? 'lead' : 'member',
+          status: 'online',
+          latencyMs: 0,
+        })
+      }
+    }
+    if (crewMembers && crewMembers.length > 0) {
+      for (const m of crewMembers) {
+        seen.set(m.id, m)
+      }
+      return [...seen.values()]
+    }
+    return seen.size > 1 ? [...seen.values()] : []
+  }, [crewMembers, groups])
+  const isMultiMachine = machineChips.length > 0
+
+  const [ackedPanes, setAckedPanes] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  )
+  const handleAck = useCallback((paneId: string) => {
+    setAckedPanes((prev) => new Set(prev).add(paneId))
+    void ackAgent(paneId).catch(() => {})
+  }, [])
+  const pinnedSet = useMemo(() => new Set(pinnedPanes ?? []), [pinnedPanes])
+  const cards = useMemo(
+    () =>
+      overviewOrder(
+        agentCards(sessions).map((c) => {
+          const paneKey = sessionPaneKey(c.session, c.pane.id)
+          const pinned = pinnedSet.has(paneKey) || pinnedSet.has(c.pane.id)
+          if (c.pane.agentStatus === 'done' && ackedPanes.has(c.pane.id)) {
+            const pane: SessionPane = { ...c.pane, agentStatus: 'idle' }
+            return { ...c, pane, paneKey, pinned, status: 'idle' as const }
+          }
+          return { ...c, paneKey, pinned }
+        }),
+        pinnedSet,
+      ),
+    [sessions, ackedPanes, pinnedSet],
+  )
+  const matchesMachine = useCallback(
+    (c: { session: Session; pane: SessionPane }) => {
+      if (!isMultiMachine || machineFilter === 'all') return true
+      const group = c.session.groupId
+        ? groupOf.get(c.session.groupId)
+        : undefined
+      const mid =
+        group?.machineId ?? overview.panes.get(c.pane.id)?.machineId ?? ''
+      if (mid) return mid === machineFilter
+      if (machineFilter === 'local') return !c.pane.id.startsWith('c:')
+      return c.pane.id.startsWith(`c:${machineFilter}/`)
+    },
+    [isMultiMachine, machineFilter, groupOf, overview.panes],
+  )
+  const machineFilteredCards = useMemo(
+    () => cards.filter(matchesMachine),
+    [cards, matchesMachine],
+  )
+  const summary = useMemo(
+    () => summarizePanes(machineFilteredCards.map((c) => c.pane)),
+    [machineFilteredCards],
+  )
   const terms = searchTerms(query)
-  const shown = cards.filter(
+  const shown = machineFilteredCards.filter(
     (c) =>
       matchesPaneFilter(c.pane, filter) &&
       matchesPaneQuery(
@@ -183,8 +286,9 @@ export function OverviewScreen({
     [groupOf, showGroups],
   )
   const queueCards = useMemo(
-    () => cards.map((c) => ({ ...c, where: placeOf(c.session) })),
-    [cards, placeOf],
+    () =>
+      machineFilteredCards.map((c) => ({ ...c, where: placeOf(c.session) })),
+    [machineFilteredCards, placeOf],
   )
 
   // Opening a pane from the log leaves the overview, as a card does.
@@ -225,6 +329,11 @@ export function OverviewScreen({
             onToggle={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
           />
         )}
+        <HostResourcePill
+          status={machineStatus}
+          active={machinesOpen}
+          onClick={() => setMachinesOpen((v) => !v)}
+        />
         <IconButton
           onClick={() => setLogOpen((v) => !v)}
           aria-label="Activity"
@@ -243,6 +352,15 @@ export function OverviewScreen({
       </div>
       <div className="flex min-h-0 flex-1">
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+          {machinesOpen && (
+            <div className="mb-3">
+              <MachinesView
+                readOnly={readOnly}
+                onClose={() => setMachinesOpen(false)}
+                onStatusLoaded={setMachineStatus}
+              />
+            </div>
+          )}
           {overview.error && (
             <p role="status" className="mb-3 text-[12px] text-fg-muted">
               Could not read the agents' details; retrying.
@@ -295,6 +413,48 @@ export function OverviewScreen({
                   unit="agent"
                 />
               </div>
+              {isMultiMachine && (
+                <fieldset
+                  aria-label="Filter by machine"
+                  className="mb-3 flex flex-wrap items-center gap-1.5"
+                >
+                  <button
+                    type="button"
+                    data-testid="machine-chip-all"
+                    aria-pressed={machineFilter === 'all'}
+                    onClick={() => setMachineFilter('all')}
+                    className={`inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[12px] font-medium transition-colors ${FOCUS_RING} ${
+                      machineFilter === 'all'
+                        ? 'border-accent bg-accent-soft text-fg'
+                        : 'border-border bg-surface text-fg-muted hover:bg-surface-raised hover:text-fg'
+                    }`}
+                  >
+                    All machines
+                  </button>
+                  {machineChips.map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      data-testid={`machine-chip-${m.id}`}
+                      aria-pressed={machineFilter === m.id}
+                      onClick={() => setMachineFilter(m.id)}
+                      className={`inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[12px] font-medium transition-colors ${FOCUS_RING} ${
+                        machineFilter === m.id
+                          ? 'border-accent bg-accent-soft text-fg'
+                          : 'border-border bg-surface text-fg-muted hover:bg-surface-raised hover:text-fg'
+                      }`}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`size-2 rounded-full ${
+                          m.status === 'online' ? 'bg-success' : 'bg-fg-subtle'
+                        }`}
+                      />
+                      <span>{m.name}</span>
+                    </button>
+                  ))}
+                </fieldset>
+              )}
               {shown.length === 0 ? (
                 <div className="flex flex-col items-center gap-2 py-6 text-center text-[13px] text-fg-muted">
                   No agents match
@@ -302,6 +462,7 @@ export function OverviewScreen({
                     size="sm"
                     onClick={() => {
                       setFilter('all')
+                      setMachineFilter('all')
                       setQuery('')
                     }}
                   >
@@ -313,7 +474,7 @@ export function OverviewScreen({
                   ref={listRef}
                   className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3"
                 >
-                  {shown.map(({ session, pane }) => {
+                  {shown.map(({ session, pane, paneKey, pinned }) => {
                     const group = session.groupId
                       ? groupOf.get(session.groupId)
                       : undefined
@@ -321,6 +482,10 @@ export function OverviewScreen({
                     const where = named
                       ? `${group.name} / ${session.name}`
                       : session.name
+                    const hostBadge = isMultiMachine
+                      ? (group?.machineName ??
+                        overview.panes.get(pane.id)?.machineName)
+                      : undefined
                     return (
                       <li
                         key={pane.id}
@@ -340,10 +505,11 @@ export function OverviewScreen({
                             named ? `${groupNoun} ${group.name}` : undefined
                           }
                           worktree={group?.worktree?.linked}
+                          machineName={hostBadge}
                           overview={overview.panes.get(pane.id)}
                           overviewFailed={overview.error}
                           now={now}
-                          paneKey={sessionPaneKey(session, pane.id)}
+                          paneKey={paneKey}
                           events={activity.events}
                           stuckFor={stuckFor(
                             pane.agentStatus,
@@ -357,6 +523,9 @@ export function OverviewScreen({
                             pane.id === target?.paneId ? targetRef : undefined
                           }
                           highlighted={pane.id === highlighted}
+                          onAck={readOnly ? undefined : handleAck}
+                          pinned={pinned}
+                          onTogglePin={onTogglePin}
                         />
                       </li>
                     )

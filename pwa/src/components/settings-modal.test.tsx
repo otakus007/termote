@@ -68,6 +68,8 @@ const DEFAULT_SETTINGS: Settings = {
   findIncludeIgnored: false,
   findExcludes: FIND_EXCLUDES_DEFAULT,
   notifyAgents: false,
+  blockedSettleSec: 5,
+  doneSettleSec: 15,
   stuckMinutes: 10,
   showUsageChip: true,
 }
@@ -901,5 +903,103 @@ describe('SettingsModal for a view-only device or with devices', () => {
       screen.queryByRole('switch', { name: 'Notify when an agent needs me' }),
     ).toBeNull()
     expect(notify.notifyWorkerReady).not.toHaveBeenCalled()
+  })
+
+  it('renders server notification controls when pushAvailable is true and updates settle/mute/telegram', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input, init) => {
+        const url = String(input)
+        if (
+          url.endsWith('/api/mux/notify/config') &&
+          (!init?.method || init.method === 'GET')
+        ) {
+          return new Response(
+            JSON.stringify({
+              blockedSettleSec: 5,
+              doneSettleSec: 15,
+              cooldownSec: 120,
+              skipWhileViewing: true,
+              categories: {
+                blocked: true,
+                done: true,
+                update: false,
+                cacheCold: false,
+                machineLoad: true,
+              },
+              publicUrl: 'https://termote.example.com',
+              telegram: {
+                configured: false,
+                enabled: false,
+                chatIdTail: '',
+              },
+            }),
+            { status: 200 },
+          )
+        }
+        if (url.endsWith('/api/mux/notify/mute')) {
+          return new Response(
+            JSON.stringify({ mutedUntil: '2099-01-01T00:00:00Z' }),
+            { status: 200 },
+          )
+        }
+        if (
+          url.endsWith('/api/mux/notify/telegram') &&
+          init?.method === 'PUT'
+        ) {
+          return new Response(
+            JSON.stringify({
+              configured: true,
+              enabled: true,
+              chatIdTail: '6789',
+            }),
+            { status: 200 },
+          )
+        }
+        return new Response(JSON.stringify({}), { status: 200 })
+      })
+
+    const onUpdateSetting = vi.fn()
+    renderWith({ pushAvailable: true, onUpdateSetting })
+
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText('Blocked settle seconds'),
+      ).toBeInTheDocument(),
+    )
+
+    // Mute 1h button
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Mute 1h' }))
+    })
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Unmute' }),
+      ).toBeInTheDocument(),
+    )
+
+    // Blocked settle change
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Blocked settle seconds'), {
+        target: { value: '10' },
+      })
+    })
+    expect(onUpdateSetting).toHaveBeenCalledWith('blockedSettleSec', 10)
+
+    // Save Telegram credentials
+    fireEvent.change(screen.getByLabelText('Telegram bot token'), {
+      target: { value: '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11' },
+    })
+    fireEvent.change(screen.getByLabelText('Telegram chat ID'), {
+      target: { value: '-100123456789' },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Save Telegram' }))
+    })
+    await waitFor(() =>
+      expect(screen.getByText(/chat …6789/)).toBeInTheDocument(),
+    )
+
+    fetchSpy.mockRestore()
   })
 })

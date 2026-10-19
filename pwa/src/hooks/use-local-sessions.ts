@@ -34,6 +34,7 @@ import {
   openWorktree as apiOpenWorktree,
   removeWorktree as apiRemoveWorktree,
   renameGroup as apiRenameGroup,
+  type CrewMemberStatus,
   closePane,
   closeTab,
   createTab,
@@ -263,6 +264,8 @@ export function buildSessions(
       name: g.name,
       agentStatus: worstAgentStatus(groupTabs.map((t) => t.agentStatus)),
       ...(g.worktree && { worktree: g.worktree }),
+      ...(g.machineId && { machineId: g.machineId }),
+      ...(g.machineName && { machineName: g.machineName }),
     })
   }
   return { sessions, groups, serverActive, activeByGroup }
@@ -285,6 +288,7 @@ export function nextClockOffset(
 export function useLocalSessions(pollInterval = 5) {
   const [sessions, setSessions] = useState<Session[]>([])
   const [groups, setGroups] = useState<SessionGroup[]>([])
+  const [crewMembers, setCrewMembers] = useState<CrewMemberStatus[]>([])
   const [activeSession, setActiveSession] = useState<Session | null>(null)
   const [isReady, setIsReady] = useState(false)
   const [isServerReachable, setIsServerReachable] = useState(true)
@@ -384,6 +388,7 @@ export function useLocalSessions(pollInterval = 5) {
       )
       setSessions(built.sessions)
       setGroups(built.groups)
+      setCrewMembers(snap.crewMembers ?? [])
       const fallback = built.serverActive ?? built.sessions[0] ?? null
       if (version !== selectionVersionRef.current) return
       const pending = pendingGroupRef.current
@@ -438,7 +443,12 @@ export function useLocalSessions(pollInterval = 5) {
     const version = selectionVersionRef.current
     const seq = ++readSeqRef.current
     try {
-      let snap = await fetchSnapshot()
+      const viewing =
+        typeof document !== 'undefined' &&
+        document.visibilityState === 'visible'
+          ? selectionRef.current?.paneId
+          : undefined
+      let snap = await fetchSnapshot(undefined, viewing)
       const hasTabs = (s: MuxSnapshot) =>
         (s.groups || []).some((g) => g.tabs.length > 0)
       // A view-only device makes nothing: it waits for a tab to exist.
@@ -447,7 +457,7 @@ export function useLocalSessions(pollInterval = 5) {
         await createTab('shell').catch((err) => {
           if (!(err instanceof RequestError)) throw err
         })
-        snap = await fetchSnapshot()
+        snap = await fetchSnapshot(undefined, viewing)
       }
       if (seq < appliedSeqRef.current) return
       appliedSeqRef.current = seq
@@ -881,6 +891,7 @@ export function useLocalSessions(pollInterval = 5) {
     },
     sessions,
     groups,
+    crewMembers,
     switchSession,
     selectPane,
     addSession,

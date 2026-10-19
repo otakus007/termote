@@ -5,6 +5,11 @@ import {
   resolveStuckMinutes,
 } from '../utils/agent-stuck'
 import {
+  DEFAULT_KEYS_LAYOUT,
+  type KeysBoardLayout,
+  validateKeysLayout,
+} from '../utils/keys-layout'
+import {
   DEFAULT_SIDEBAR_FILTER,
   resolveSidebarFilter,
   type SidebarFilter,
@@ -12,6 +17,33 @@ import {
 import { SIDE_PANEL_DEFAULT } from '../utils/side-panel-width'
 
 const STORAGE_KEY = 'termote-settings'
+
+export const QUICK_REPLIES_DEFAULT = [
+  'Continue',
+  'Run tests & fix failures',
+  'Commit changes',
+  'Explain root cause',
+]
+
+export const QUICK_REPLIES_MAX = 20
+
+export function resolveQuickReplies(value: unknown): string[] {
+  if (!Array.isArray(value)) return QUICK_REPLIES_DEFAULT
+  const cleaned = value
+    .filter((v): v is string => typeof v === 'string')
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0 && v.length <= 200)
+  return [...new Set(cleaned)].slice(0, QUICK_REPLIES_MAX)
+}
+
+export function resolvePinnedPanes(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const ids = value.filter(
+    (v): v is string =>
+      typeof v === 'string' && v.trim().length > 0 && v.length <= 128,
+  )
+  return [...new Set(ids)].slice(0, 64)
+}
 
 // Directory names a file search never enters for ignored files, nor
 // outside a repository: dependencies and build output
@@ -83,8 +115,29 @@ export interface Settings {
   findIncludeIgnored: boolean // Files search: a repo's ignored files too
   findExcludes: string[] // Files search: folder names never searched (above)
   notifyAgents: boolean // notify when an agent is blocked or ends a turn
+  blockedSettleSec: number // seconds an agent must stay blocked before notifying
+  doneSettleSec: number // seconds an agent must stay done/idle before notifying
   stuckMinutes: number // overview: a working agent quiet this long may be stuck
   showUsageChip: boolean // header: the open pane's agent's context and limits
+  leftHanded?: boolean // mirror floating actions and thumb controls for left hand
+  zenMode?: boolean // collapse top chrome into a minimal floating exit pill
+  pinnedPanes?: string[] // pane IDs pinned to the top of Overview
+  keysLayout?: KeysBoardLayout // customizable 2D keys board layout
+  quickReplies?: string[] // customizable one-tap quick reply chips
+  htmlPreview?: boolean // Files: HTML rendered in sandboxed iframe (else source)
+}
+
+export function resolveSettleSec(
+  val: unknown,
+  def: number,
+  max: number,
+): number {
+  return typeof val === 'number' &&
+    Number.isInteger(val) &&
+    val >= 0 &&
+    val <= max
+    ? val
+    : def
 }
 
 const DEFAULTS: Settings = {
@@ -108,8 +161,16 @@ const DEFAULTS: Settings = {
   findIncludeIgnored: false,
   findExcludes: FIND_EXCLUDES_DEFAULT,
   notifyAgents: false,
+  blockedSettleSec: 5,
+  doneSettleSec: 15,
   stuckMinutes: DEFAULT_STUCK_MINUTES,
   showUsageChip: true,
+  leftHanded: false,
+  zenMode: false,
+  pinnedPanes: [],
+  keysLayout: DEFAULT_KEYS_LAYOUT,
+  quickReplies: QUICK_REPLIES_DEFAULT,
+  htmlPreview: true,
 }
 
 // Listeners for useSyncExternalStore
@@ -129,7 +190,12 @@ let cachedJson = ''
 let cachedSettings = DEFAULTS
 
 function getSnapshot(): Settings {
-  const json = localStorage.getItem(STORAGE_KEY) ?? ''
+  let json = ''
+  try {
+    json = localStorage.getItem(STORAGE_KEY) ?? ''
+  } catch {
+    return DEFAULTS
+  }
   if (json !== cachedJson) {
     cachedJson = json
     try {
@@ -144,9 +210,18 @@ function getSnapshot(): Settings {
         findIncludeIgnored: merged.findIncludeIgnored === true,
         findExcludes: resolveFindExcludes(merged.findExcludes),
         notifyAgents: merged.notifyAgents === true,
+        blockedSettleSec: resolveSettleSec(merged.blockedSettleSec, 5, 60),
+        doneSettleSec: resolveSettleSec(merged.doneSettleSec, 15, 120),
         stuckMinutes: resolveStuckMinutes(merged.stuckMinutes),
         copyOnSelect: merged.copyOnSelect === true,
         showUsageChip: merged.showUsageChip !== false,
+        leftHanded: merged.leftHanded === true,
+        zenMode: merged.zenMode === true,
+        pinnedPanes: resolvePinnedPanes(merged.pinnedPanes),
+        keysLayout:
+          validateKeysLayout(merged.keysLayout) ?? DEFAULT_KEYS_LAYOUT,
+        quickReplies: resolveQuickReplies(merged.quickReplies),
+        htmlPreview: merged.htmlPreview !== false,
       }
     } catch {
       cachedSettings = DEFAULTS

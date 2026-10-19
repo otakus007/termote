@@ -308,6 +308,30 @@ describe('useSettings', () => {
     expect(saved.tablePreview).toBe(false)
     expect(saved.markdownPreview).toBe(false)
   })
+
+  it('persists and validates leftHanded, zenMode, pinnedPanes, keysLayout, and quickReplies', () => {
+    const { result } = renderHook(() => useSettings())
+    expect(result.current.settings.leftHanded).toBe(false)
+    expect(result.current.settings.zenMode).toBe(false)
+    expect(result.current.settings.pinnedPanes).toEqual([])
+    expect(result.current.settings.keysLayout?.preset).toBe('default')
+    expect(result.current.settings.quickReplies).toContain('Continue')
+
+    act(() => result.current.updateSetting('leftHanded', true))
+    act(() => result.current.updateSetting('zenMode', true))
+    act(() => result.current.updateSetting('pinnedPanes', ['%1', '%2']))
+    act(() =>
+      result.current.updateSetting('quickReplies', ['Continue', 'Ship it']),
+    )
+
+    expect(result.current.settings.leftHanded).toBe(true)
+    expect(result.current.settings.zenMode).toBe(true)
+    expect(result.current.settings.pinnedPanes).toEqual(['%1', '%2'])
+    expect(result.current.settings.quickReplies).toEqual([
+      'Continue',
+      'Ship it',
+    ])
+  })
 })
 
 describe('excluded folder names', () => {

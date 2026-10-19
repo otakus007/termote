@@ -27,4 +27,26 @@ describe('overviewOrder', () => {
     ]
     expect(overviewOrder(cards).map((c) => c.id)).toEqual(['a', 'b'])
   })
+  it('sorts pinned panes before unpinned panes while keeping status rank inside each group', () => {
+    const cards = [
+      {
+        id: 'idle-pinned',
+        paneKey: 'g1:idle',
+        status: 'idle' as const,
+      },
+      {
+        id: 'blocked-unpinned',
+        paneKey: 'g1:blocked',
+        status: 'blocked' as const,
+      },
+      {
+        id: 'working-pinned',
+        paneKey: 'g1:working',
+        status: 'working' as const,
+      },
+    ]
+    expect(
+      overviewOrder(cards, ['g1:idle', 'g1:working']).map((c) => c.id),
+    ).toEqual(['working-pinned', 'idle-pinned', 'blocked-unpinned'])
+  })
 })

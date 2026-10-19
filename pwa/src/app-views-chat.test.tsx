@@ -80,7 +80,7 @@ describe('chat view', () => {
     ],
     [
       'the agent has no transcript reader',
-      { session: { ...claudePane.session, agentName: 'pi' } },
+      { session: { ...claudePane.session, agentName: 'aider' } },
     ],
     [
       'the agent is not named',
@@ -90,8 +90,20 @@ describe('chat view', () => {
     expect(ids({ ...claudePane, ...over })).toEqual(['terminal'])
   })
 
-  it('is offered for a Codex pane', () => {
+  it('is offered for Codex, OpenCode, and pi panes', () => {
     expect(ids(codexPane)).toEqual(['terminal', CHAT_VIEW_ID])
+    expect(
+      ids({
+        ...claudePane,
+        session: { ...claudePane.session, agentName: 'opencode' },
+      }),
+    ).toEqual(['terminal', CHAT_VIEW_ID])
+    expect(
+      ids({
+        ...claudePane,
+        session: { ...claudePane.session, agentName: 'pi' },
+      }),
+    ).toEqual(['terminal', CHAT_VIEW_ID])
   })
 
   it('gives Claude Code and Codex the composer, another agent a read-only bar', () => {

@@ -20,7 +20,7 @@ const (
 	containerName   = "termote"
 	containerPort   = 7680 // server port inside the container
 	adminUser       = "admin"
-	updateRepo      = "lamngockhuong/termote"
+	updateRepo      = "otakus007/termote"
 	defaultLogLines = 50
 )
 
@@ -241,6 +241,10 @@ func (c *cli) dispatch(cmd string, args []string) error {
 		return c.cmdDevices(args)
 	case "signins":
 		return c.cmdSignins(args)
+	case "hooks":
+		return c.cmdHooks(args)
+	case "crew":
+		return c.cmdCrew(args)
 	case "container":
 		return c.cmdContainer(args)
 	case "uninstall":
@@ -476,6 +480,8 @@ Commands:
   devices              List the paired devices; devices revoke <id> signs one out
   signins              List the browsers signed in with the password;
                        signins revoke <id> | --all signs them out
+  crew <cmd>           Multi-machine Crew federation: invite, join, add, status,
+                       remove, deputy, promote
   container <cmd>      Run the server in a container: up, down, logs [-f], status
   update               Update to the latest release
   uninstall [--purge]  Remove the service, the command, the install and uploaded images

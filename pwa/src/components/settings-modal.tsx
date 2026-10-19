@@ -1,16 +1,29 @@
 import { Trash2, X } from 'lucide-react'
 import { type ReactNode, useEffect, useId, useState } from 'react'
 import {
+  deleteTelegramConfig,
+  fetchNotifyConfig,
+  type NotifyCategories,
+  type NotifyConfig,
+  setNotifyMute,
+  testTelegramNotification,
+  updateNotifyConfig,
+  updateTelegramConfig,
+} from '../hooks/use-mux-api'
+import {
   FIND_EXCLUDES_DEFAULT,
   FIND_EXCLUDES_MAX,
   findExcludeProblem,
   type ImeSendBehavior,
   type PasteSource,
+  QUICK_REPLIES_DEFAULT,
+  QUICK_REPLIES_MAX,
   type Settings,
 } from '../hooks/use-settings'
 import { UI_STYLES, type UiStyle } from '../ui-style'
 import { STUCK_MINUTES_OPTIONS } from '../utils/agent-stuck'
 import type { ServerInfo } from '../utils/app-update'
+import { DEFAULT_KEYS_LAYOUT } from '../utils/keys-layout'
 import {
   needsHomeScreenApp,
   notificationSupport,
@@ -18,6 +31,7 @@ import {
   requestNotify,
 } from '../utils/notify-permission'
 import { DevicesSection } from './devices-section'
+import { KeysBoardEditor } from './keys-board-editor'
 import { SigninsSection } from './signins-section'
 import { Button, FOCUS_RING, IconButton } from './ui/button'
 import { SegmentedControl } from './ui/segmented-control'
@@ -287,6 +301,91 @@ function ExcludedFoldersRow({
   )
 }
 
+function QuickRepliesSettingsRow({
+  value,
+  onSave,
+}: {
+  value: string[]
+  onSave: (value: string[]) => void
+}) {
+  const [draft, setDraft] = useState('')
+  const inputId = useId()
+  const addReply = () => {
+    const trimmed = draft.trim()
+    if (
+      !trimmed ||
+      value.includes(trimmed) ||
+      value.length >= QUICK_REPLIES_MAX
+    ) {
+      return
+    }
+    onSave([...value, trimmed])
+    setDraft('')
+  }
+  const isDefault =
+    value.length === QUICK_REPLIES_DEFAULT.length &&
+    value.every((v, i) => v === QUICK_REPLIES_DEFAULT[i])
+  return (
+    <div className="flex flex-col gap-2 px-4 py-2.5 ui-native:bg-surface-raised">
+      <div>
+        <label
+          htmlFor={inputId}
+          className="block text-[15px] text-fg ui-terminal:font-label ui-terminal:text-[13px]"
+        >
+          Quick replies
+        </label>
+        <p className="m-0 text-[12px] text-fg-muted">
+          One-tap reply chips shown above the chat composer and terminal
+        </p>
+      </div>
+      <ul aria-label="Quick reply chips" className="flex flex-wrap gap-1.5">
+        {value.map((chip) => (
+          <li
+            key={chip}
+            className="flex items-center gap-0.5 rounded-control border border-border bg-bg pl-2 text-[12px] text-fg"
+          >
+            {chip}
+            <IconButton
+              size="sm"
+              variant="ghost"
+              aria-label={`Remove quick reply ${chip}`}
+              onClick={() => onSave(value.filter((x) => x !== chip))}
+            >
+              <X size={12} aria-hidden="true" />
+            </IconButton>
+          </li>
+        ))}
+      </ul>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          id={inputId}
+          type="text"
+          value={draft}
+          placeholder="New quick reply…"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter') return
+            e.preventDefault()
+            addReply()
+          }}
+          className={`w-44 px-2 ${CONTROL} ${FOCUS_RING}`}
+        />
+        <Button size="sm" onClick={addReply}>
+          Add reply
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={isDefault}
+          onClick={() => onSave(QUICK_REPLIES_DEFAULT)}
+        >
+          Reset quick replies
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 const formatSeconds = (s: number) => (s >= 60 ? `${s / 60}m` : `${s}s`)
 
 const POLL_INTERVAL_OPTIONS = [3, 5, 10, 15, 30, 60, 120, 300]
@@ -397,6 +496,387 @@ function NotifyAgentsRow({
   )
 }
 
+const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
+  blockedSettleSec: 5,
+  doneSettleSec: 15,
+  cooldownSec: 30,
+  skipWhileViewing: true,
+  categories: {
+    blocked: true,
+    done: true,
+    update: false,
+    cacheCold: false,
+    machineLoad: true,
+  },
+  publicUrl: '',
+  telegram: {
+    configured: false,
+    enabled: false,
+    chatIdTail: '',
+  },
+}
+
+const CATEGORY_ITEMS: { key: keyof NotifyCategories; label: string }[] = [
+  { key: 'blocked', label: 'Agent blocked' },
+  { key: 'done', label: 'Agent finished' },
+  { key: 'update', label: 'Server updates' },
+  { key: 'cacheCold', label: 'Prompt cache cooling' },
+  { key: 'machineLoad', label: 'High machine load' },
+]
+
+const MUTE_OPTIONS = [
+  { label: '1h', minutes: 60 },
+  { label: '4h', minutes: 240 },
+  { label: '8h', minutes: 480 },
+]
+
+function ServerNotifySection({
+  isOpen,
+  onUpdateSetting,
+}: {
+  isOpen: boolean
+  onUpdateSetting: <K extends keyof Settings>(
+    key: K,
+    value: Settings[K],
+  ) => void
+}) {
+  const [config, setConfig] = useState<NotifyConfig>(DEFAULT_NOTIFY_CONFIG)
+  const [publicUrlDraft, setPublicUrlDraft] = useState('')
+  const [botToken, setBotToken] = useState('')
+  const [chatId, setChatId] = useState('')
+  const [tgFeedback, setTgFeedback] = useState<string>()
+  const [tgError, setTgError] = useState<string>()
+
+  useEffect(() => {
+    if (!isOpen || typeof fetch !== 'function') return
+    const ctrl = new AbortController()
+    fetchNotifyConfig(ctrl.signal)
+      .then((cfg) => {
+        if (ctrl.signal.aborted || !cfg?.categories) return
+        setConfig(cfg)
+        setPublicUrlDraft(cfg.publicUrl ?? '')
+      })
+      .catch(() => {})
+    return () => ctrl.abort()
+  }, [isOpen])
+
+  const applyConfigUpdate = async (
+    patch: Parameters<typeof updateNotifyConfig>[0],
+  ) => {
+    try {
+      const updated = await updateNotifyConfig(patch)
+      if (updated?.categories) {
+        setConfig(updated)
+        setPublicUrlDraft(updated.publicUrl ?? '')
+      }
+      setTgError(undefined)
+    } catch (err) {
+      setTgError(
+        (err as Error)?.message || 'Could not update notification settings',
+      )
+    }
+  }
+
+  const handleMute = async (minutes: number) => {
+    try {
+      const mutedUntil = await setNotifyMute(minutes)
+      setConfig((prev) => ({ ...prev, mutedUntil: mutedUntil || undefined }))
+    } catch {
+      // ignore
+    }
+  }
+
+  const handleSaveTelegram = async () => {
+    setTgFeedback(undefined)
+    setTgError(undefined)
+    try {
+      const st = await updateTelegramConfig({
+        botToken: botToken.trim(),
+        chatId: chatId.trim(),
+        enabled: true,
+      })
+      setConfig((prev) => ({ ...prev, telegram: st }))
+      setBotToken('')
+      setChatId('')
+      setTgFeedback('Telegram configured')
+    } catch (err) {
+      setTgError((err as Error)?.message || 'Invalid Telegram credentials')
+    }
+  }
+
+  const handleToggleTelegram = async (enabled: boolean) => {
+    setTgFeedback(undefined)
+    setTgError(undefined)
+    try {
+      const st = await updateTelegramConfig({ enabled })
+      setConfig((prev) => ({ ...prev, telegram: st }))
+    } catch (err) {
+      setTgError((err as Error)?.message || 'Could not update Telegram status')
+    }
+  }
+
+  const handleTestTelegram = async () => {
+    setTgFeedback(undefined)
+    setTgError(undefined)
+    try {
+      await testTelegramNotification()
+      setTgFeedback('Test notification sent')
+    } catch (err) {
+      setTgError((err as Error)?.message || 'Telegram test failed')
+    }
+  }
+
+  const handleRemoveTelegram = async () => {
+    setTgFeedback(undefined)
+    setTgError(undefined)
+    try {
+      await deleteTelegramConfig()
+      setConfig((prev) => ({
+        ...prev,
+        telegram: { configured: false, enabled: false, chatIdTail: '' },
+      }))
+      setTgFeedback('Telegram removed')
+    } catch (err) {
+      setTgError((err as Error)?.message || 'Could not remove Telegram')
+    }
+  }
+
+  const savePublicUrl = () => {
+    const trimmed = publicUrlDraft.trim()
+    if (trimmed !== config.publicUrl) {
+      void applyConfigUpdate({ publicUrl: trimmed })
+    }
+  }
+
+  const isMuted = Boolean(config.mutedUntil)
+
+  return (
+    <>
+      <SettingsRow
+        title="Mute notifications"
+        desc={
+          isMuted
+            ? `Muted until ${new Date(config.mutedUntil!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+            : 'Temporarily silence Web Push and Telegram alerts'
+        }
+      >
+        <div className="flex flex-wrap items-center gap-1.5">
+          {MUTE_OPTIONS.map((m) => (
+            <Button
+              key={m.label}
+              size="sm"
+              variant="ghost"
+              aria-label={`Mute ${m.label}`}
+              onClick={() => handleMute(m.minutes)}
+            >
+              {m.label}
+            </Button>
+          ))}
+          {isMuted && (
+            <Button size="sm" variant="ghost" onClick={() => handleMute(0)}>
+              Unmute
+            </Button>
+          )}
+        </div>
+      </SettingsRow>
+
+      <SettingsRow
+        title="Skip while viewing"
+        desc="Suppress alerts for a pane you are actively watching"
+      >
+        <Switch
+          label="Skip while viewing"
+          checked={config.skipWhileViewing}
+          onChange={(v) => {
+            setConfig((prev) => ({ ...prev, skipWhileViewing: v }))
+            void applyConfigUpdate({ skipWhileViewing: v })
+          }}
+        />
+      </SettingsRow>
+
+      <SettingsRow
+        title="Settle & cooldown"
+        desc="Wait before alerting on transient status changes (seconds)"
+      >
+        <div className="flex flex-wrap items-center gap-2 text-[12px] text-fg-muted">
+          <label className="flex items-center gap-1">
+            Blocked
+            <input
+              type="number"
+              min={0}
+              max={60}
+              aria-label="Blocked settle seconds"
+              value={config.blockedSettleSec}
+              onChange={(e) => {
+                const v = Math.max(0, Math.min(60, Number(e.target.value) || 0))
+                setConfig((prev) => ({ ...prev, blockedSettleSec: v }))
+                onUpdateSetting('blockedSettleSec', v)
+                void applyConfigUpdate({ blockedSettleSec: v })
+              }}
+              className={`w-14 px-1.5 text-center ${CONTROL} ${FOCUS_RING}`}
+            />
+          </label>
+          <label className="flex items-center gap-1">
+            Done
+            <input
+              type="number"
+              min={0}
+              max={120}
+              aria-label="Done settle seconds"
+              value={config.doneSettleSec}
+              onChange={(e) => {
+                const v = Math.max(
+                  0,
+                  Math.min(120, Number(e.target.value) || 0),
+                )
+                setConfig((prev) => ({ ...prev, doneSettleSec: v }))
+                onUpdateSetting('doneSettleSec', v)
+                void applyConfigUpdate({ doneSettleSec: v })
+              }}
+              className={`w-14 px-1.5 text-center ${CONTROL} ${FOCUS_RING}`}
+            />
+          </label>
+          <label className="flex items-center gap-1">
+            Cooldown
+            <input
+              type="number"
+              min={0}
+              max={600}
+              aria-label="Notification cooldown seconds"
+              value={config.cooldownSec}
+              onChange={(e) => {
+                const v = Math.max(
+                  0,
+                  Math.min(600, Number(e.target.value) || 0),
+                )
+                setConfig((prev) => ({ ...prev, cooldownSec: v }))
+                void applyConfigUpdate({ cooldownSec: v })
+              }}
+              className={`w-16 px-1.5 text-center ${CONTROL} ${FOCUS_RING}`}
+            />
+          </label>
+        </div>
+      </SettingsRow>
+
+      <div className="flex flex-col gap-2 px-4 py-2.5 ui-native:bg-surface-raised">
+        <p className="m-0 text-[15px] text-fg ui-terminal:font-label ui-terminal:text-[13px]">
+          Notification categories
+        </p>
+        <div className="flex flex-wrap gap-3">
+          {CATEGORY_ITEMS.map(({ key, label }) => (
+            <label
+              key={key}
+              className="flex items-center gap-1.5 text-[13px] text-fg"
+            >
+              <input
+                type="checkbox"
+                checked={config.categories[key]}
+                onChange={(e) => {
+                  const nextVal = e.target.checked
+                  setConfig((prev) => ({
+                    ...prev,
+                    categories: { ...prev.categories, [key]: nextVal },
+                  }))
+                  void applyConfigUpdate({ categories: { [key]: nextVal } })
+                }}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <SettingsRow
+        title="Public URL"
+        desc="HTTPS base URL for deep-links in Telegram alerts"
+        htmlFor="notify-public-url"
+      >
+        <input
+          id="notify-public-url"
+          aria-label="Public URL"
+          type="url"
+          value={publicUrlDraft}
+          placeholder="https://termote.example.com"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          onChange={(e) => setPublicUrlDraft(e.target.value)}
+          onBlur={savePublicUrl}
+          onKeyDown={(e) => e.key === 'Enter' && savePublicUrl()}
+          className={`w-52 px-2 font-term ${CONTROL} ${FOCUS_RING}`}
+        />
+      </SettingsRow>
+
+      <div className="flex flex-col gap-2 px-4 py-2.5 ui-native:bg-surface-raised">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <p className="m-0 text-[15px] text-fg ui-terminal:font-label ui-terminal:text-[13px]">
+              Telegram Bot
+            </p>
+            <p className="m-0 text-[12px] text-fg-muted">
+              {config.telegram.configured
+                ? `Configured (chat …${config.telegram.chatIdTail})`
+                : 'Send notifications via a Telegram bot'}
+            </p>
+          </div>
+          {config.telegram.configured && (
+            <Switch
+              label="Enable Telegram"
+              checked={config.telegram.enabled}
+              onChange={handleToggleTelegram}
+            />
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="password"
+            aria-label="Telegram bot token"
+            value={botToken}
+            placeholder="Bot token (123456:ABC...)"
+            autoComplete="off"
+            onChange={(e) => setBotToken(e.target.value)}
+            className={`w-44 px-2 font-term ${CONTROL} ${FOCUS_RING}`}
+          />
+          <input
+            type="text"
+            aria-label="Telegram chat ID"
+            value={chatId}
+            placeholder="Chat ID"
+            autoComplete="off"
+            onChange={(e) => setChatId(e.target.value)}
+            className={`w-32 px-2 font-term ${CONTROL} ${FOCUS_RING}`}
+          />
+          <Button
+            size="sm"
+            disabled={!botToken.trim() || !chatId.trim()}
+            onClick={handleSaveTelegram}
+          >
+            Save Telegram
+          </Button>
+          {config.telegram.configured && (
+            <>
+              <Button size="sm" variant="ghost" onClick={handleTestTelegram}>
+                Send test
+              </Button>
+              <Button size="sm" variant="danger" onClick={handleRemoveTelegram}>
+                Remove Telegram
+              </Button>
+            </>
+          )}
+        </div>
+        {tgFeedback && (
+          <p className="m-0 text-[12px] text-fg-muted">{tgFeedback}</p>
+        )}
+        {tgError && (
+          <p role="alert" className="m-0 text-[12px] text-danger">
+            {tgError}
+          </p>
+        )}
+      </div>
+    </>
+  )
+}
+
 // A tiny drawing of each style's shape: corner radius, hairline or raised.
 const STYLE_PREVIEW: Record<UiStyle, string> = {
   terminal: 'rounded-[2px] border border-border-strong bg-bg',
@@ -470,6 +950,7 @@ export function SettingsModal({
     })
     return () => cancelAnimationFrame(frame)
   }, [isOpen, initialGroup])
+  const [keysEditorOpen, setKeysEditorOpen] = useState(false)
 
   const imeOption = IME_SEND_OPTIONS.find(
     (o) => o.value === settings.imeSendBehavior,
@@ -483,23 +964,45 @@ export function SettingsModal({
       id: 'appearance',
       title: 'Appearance',
       rows: (
-        <div className="flex flex-col gap-2 px-4 py-2.5 ui-native:bg-surface-raised">
-          <div>
-            <p className="m-0 text-[15px] text-fg ui-terminal:font-label ui-terminal:text-[13px]">
-              Interface style
-            </p>
-            <p className="m-0 text-[12px] text-fg-muted">
-              Applies at once. Theme stays in the ⋯ menu.
-            </p>
+        <>
+          <div className="flex flex-col gap-2 px-4 py-2.5 ui-native:bg-surface-raised">
+            <div>
+              <p className="m-0 text-[15px] text-fg ui-terminal:font-label ui-terminal:text-[13px]">
+                Interface style
+              </p>
+              <p className="m-0 text-[12px] text-fg-muted">
+                Applies at once. Theme stays in the ⋯ menu.
+              </p>
+            </div>
+            <SegmentedControl
+              label="Interface style"
+              options={STYLE_OPTIONS}
+              value={settings.uiStyle}
+              onChange={(v) => onUpdateSetting('uiStyle', v)}
+              className="self-start"
+            />
           </div>
-          <SegmentedControl
-            label="Interface style"
-            options={STYLE_OPTIONS}
-            value={settings.uiStyle}
-            onChange={(v) => onUpdateSetting('uiStyle', v)}
-            className="self-start"
-          />
-        </div>
+          <SettingsRow
+            title="Left-handed mode"
+            desc="Mirror floating action buttons and thumb controls to the left side"
+          >
+            <Switch
+              label="Left-handed mode"
+              checked={settings.leftHanded === true}
+              onChange={(v) => onUpdateSetting('leftHanded', v)}
+            />
+          </SettingsRow>
+          <SettingsRow
+            title="Zen mode"
+            desc="Collapse top chrome into a minimal floating exit pill"
+          >
+            <Switch
+              label="Zen mode"
+              checked={settings.zenMode === true}
+              onChange={(v) => onUpdateSetting('zenMode', v)}
+            />
+          </SettingsRow>
+        </>
       ),
     },
     {
@@ -543,6 +1046,22 @@ export function SettingsModal({
               onChange={(v) => onUpdateSetting('toolbarDefaultExpanded', v)}
             />
           </SettingsRow>
+          <SettingsRow
+            title="2D keys board"
+            desc="Customize the 7-column key grid, sticky modifiers, and shareable tmk1: layout codes"
+          >
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setKeysEditorOpen(true)}
+            >
+              Customize keys…
+            </Button>
+          </SettingsRow>
+          <QuickRepliesSettingsRow
+            value={settings.quickReplies ?? QUICK_REPLIES_DEFAULT}
+            onSave={(v) => onUpdateSetting('quickReplies', v)}
+          />
         </>
       ),
     },
@@ -624,6 +1143,12 @@ export function SettingsModal({
               onDisable={onDisableNotify}
             />
           )}
+          {!readOnly && pushAvailable && (
+            <ServerNotifySection
+              isOpen={isOpen}
+              onUpdateSetting={onUpdateSetting}
+            />
+          )}
           <SettingsRow
             title="Stuck agent"
             desc={`Mark a working agent quiet for ${settings.stuckMinutes} min in the overview`}
@@ -681,10 +1206,22 @@ export function SettingsModal({
     id: 'files',
     title: 'Files',
     rows: (
-      <ExcludedFoldersRow
-        value={settings.findExcludes}
-        onSave={(v) => onUpdateSetting('findExcludes', v)}
-      />
+      <>
+        <SettingsRow
+          title="Preview HTML files"
+          desc="Render .html files in a strictly sandboxed preview frame by default"
+        >
+          <Switch
+            label="Preview HTML files"
+            checked={settings.htmlPreview !== false}
+            onChange={(v) => onUpdateSetting('htmlPreview', v)}
+          />
+        </SettingsRow>
+        <ExcludedFoldersRow
+          value={settings.findExcludes}
+          onSave={(v) => onUpdateSetting('findExcludes', v)}
+        />
+      </>
     ),
   })
 
@@ -787,6 +1324,12 @@ export function SettingsModal({
           ))}
         </div>
       </div>
+      <KeysBoardEditor
+        isOpen={keysEditorOpen}
+        onClose={() => setKeysEditorOpen(false)}
+        layout={settings.keysLayout ?? DEFAULT_KEYS_LAYOUT}
+        onSave={(l) => onUpdateSetting('keysLayout', l)}
+      />
     </Sheet>
   )
 }

@@ -246,7 +246,7 @@ describe('ChatView agent state', () => {
       />,
     )
     expect(promptStore.pane).toBeUndefined()
-    expect(screen.getByText('agent · pi')).toBeInTheDocument()
+    expect(screen.getByText('pi · pi')).toBeInTheDocument()
   })
 
   it('view-only reads the dialog of a Codex pane', () => {
@@ -265,7 +265,10 @@ describe('ChatView agent state', () => {
   it('names an agent it has no label for generically', () => {
     set({ error: 'no-session' })
     render(
-      <ChatView {...props} session={{ ...props.session, agentName: 'pi' }} />,
+      <ChatView
+        {...props}
+        session={{ ...props.session, agentName: 'aider' }}
+      />,
     )
     expect(
       screen.getByText('No agent session found in this pane.'),

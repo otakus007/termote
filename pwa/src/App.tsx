@@ -12,6 +12,7 @@ import {
   type AppView,
   availableViews,
   CHAT_VIEW_ID,
+  FILES_VIEW_ID,
   type NotifyOptions,
   TERMINAL_VIEW_ID,
   type ViewContext,
@@ -52,6 +53,7 @@ import {
 import { useTheme } from './contexts/theme-context'
 import { useAgentNotifications } from './hooks/use-agent-notifications'
 import { useCommandHistory } from './hooks/use-command-history'
+import { followInFiles } from './hooks/use-files'
 import { useFontSize } from './hooks/use-font-size'
 import { useFullscreen } from './hooks/use-fullscreen'
 import { useGestures } from './hooks/use-gestures'
@@ -93,6 +95,7 @@ import {
   LARGE_PACKET_HELP_URL,
   onLargePacketLoss,
 } from './utils/large-packet-loss'
+import type { LinkPath } from './utils/markdown-links'
 import { loadPaneView, savePaneView } from './utils/pane-view'
 import { formatRunning, uniqueNames } from './utils/running-commands'
 import { matchesFilter } from './utils/session-filter'
@@ -247,6 +250,7 @@ export default function App({
     activeSession,
     sessions,
     groups = [],
+    crewMembers,
     switchSession,
     selectPane,
     addSession,
@@ -286,6 +290,8 @@ export default function App({
     activePaneId: activeSession.paneId,
     enabled: settings.notifyAgents,
     pushActive: push.pushActive,
+    blockedSettleSec: settings.blockedSettleSec,
+    doneSettleSec: settings.doneSettleSec,
   })
   // Ends the session on the server, then shows the sign-in page. This
   // device stops getting pushes first (the server forgets it within 3 s).
@@ -1234,9 +1240,30 @@ export default function App({
     },
     [selectSession],
   )
+  const handleTogglePin = useCallback(
+    (paneKey: string) => {
+      const current = settings.pinnedPanes ?? []
+      const next = current.includes(paneKey)
+        ? current.filter((k) => k !== paneKey)
+        : [...current, paneKey]
+      updateSetting('pinnedPanes', next)
+    },
+    [settings.pinnedPanes, updateSetting],
+  )
+  const handleOpenFileFromSheet = useCallback(
+    (target: LinkPath) => {
+      if (!activeSession.paneId) return
+      setSelectTextOpen(false)
+      void followInFiles(activeSession.paneId, target)
+      changeView(FILES_VIEW_ID)
+    },
+    [activeSession.paneId, changeView],
+  )
 
   return (
     <div
+      data-left-handed={settings.leftHanded ? 'true' : undefined}
+      data-zen-mode={settings.zenMode ? 'true' : undefined}
       // A size container: the history list caps its height at a share of
       // the app's (cqh), which follows the keyboard, unlike vh
       className="flex flex-col overflow-hidden bg-bg font-ui text-fg [container-type:size]"
@@ -1261,6 +1288,7 @@ export default function App({
           <SessionSidebar
             sessions={sessions}
             groups={groups}
+            crewMembers={crewMembers}
             activeId={activeSession.id}
             onSelect={selectFromList}
             onAdd={readOnly ? undefined : addTab}
@@ -1283,6 +1311,7 @@ export default function App({
           <SessionSidebar
             sessions={sessions}
             groups={groups}
+            crewMembers={crewMembers}
             activeId={activeSession.id}
             onSelect={handleMobileSelect}
             onAdd={readOnly ? undefined : handleMobileAdd}
@@ -1300,58 +1329,72 @@ export default function App({
         )}
 
         <main className="flex-1 flex flex-col min-w-0">
-          <AppHeader
-            isMobile={isMobile}
-            session={activeSession}
-            groupSessions={groupSessions}
-            groupName={groupName}
-            blockedElsewhere={blockedElsewhere}
-            showBrand={sidebarCollapsed}
-            showSessionTabs={settings.showSessionTabs}
-            canRemoveTab={!readOnly && sessions.length > 1}
-            onSelectTab={selectFromList}
-            onAddTab={readOnly ? undefined : () => addTab('New')}
-            onRemoveTab={requestRemove}
-            connectionState={connectionState}
-            onRetry={() => terminalRef.current?.reconnect()}
-            sessionsOpen={sidebarOpen}
-            onOpenSessions={() => setSidebarOpen(true)}
-            fontSize={fontSize}
-            // The font size only applies to the terminal
-            showFontSize={isTerminalView}
-            onDecreaseFont={decrease}
-            onIncreaseFont={increase}
-            isFullscreen={isFullscreen}
-            onToggleFullscreen={canFullscreen ? toggleFullscreen : undefined}
-            views={switcherViews}
-            viewId={currentView.id}
-            onViewChange={changeView}
-            onOpenOverview={openOverview}
-            usageChip={
-              <HeaderUsageChip
-                paneId={activeSession.paneId}
-                hasAgent={activeSession.hasAgent}
-                enabled={settings.showUsageChip}
-                pollInterval={settings.pollInterval * 1000}
-                isMobile={isMobile}
-                onOpen={openOverviewOn}
-              />
-            }
-            viewPanelId={viewPanelId}
-            panelViews={panelViews}
-            sidePanelId={sidePanelView ? sidePanelId : null}
-            onTogglePanel={togglePanel}
-            menu={{
-              onOpenAbout: () => setAboutOpen(true),
-              onOpenHelp: () => setHelpOpen(true),
-              onOpenSettings: () => {
-                setSettingsGroup(undefined)
-                setSettingsOpen(true)
-              },
-              onCopyLink: shownLink ? copyLink : undefined,
-              onLogout: mux.caps.auth ? handleLogout : undefined,
-            }}
-          />
+          {settings.zenMode && !overviewOpen ? (
+            <button
+              type="button"
+              data-testid="exit-zen-mode"
+              aria-label="Exit Zen mode"
+              onClick={() => updateSetting('zenMode', false)}
+              className={`fixed top-2 z-30 flex h-8 items-center gap-1.5 rounded-full border border-border bg-surface/90 px-3 text-[12px] font-medium text-fg shadow-md backdrop-blur-sm hover:bg-surface-raised ${
+                settings.leftHanded ? 'left-3' : 'right-3'
+              }`}
+            >
+              Exit Zen
+            </button>
+          ) : (
+            <AppHeader
+              isMobile={isMobile}
+              session={activeSession}
+              groupSessions={groupSessions}
+              groupName={groupName}
+              blockedElsewhere={blockedElsewhere}
+              showBrand={sidebarCollapsed}
+              showSessionTabs={settings.showSessionTabs}
+              canRemoveTab={!readOnly && sessions.length > 1}
+              onSelectTab={selectFromList}
+              onAddTab={readOnly ? undefined : () => addTab('New')}
+              onRemoveTab={requestRemove}
+              connectionState={connectionState}
+              onRetry={() => terminalRef.current?.reconnect()}
+              sessionsOpen={sidebarOpen}
+              onOpenSessions={() => setSidebarOpen(true)}
+              fontSize={fontSize}
+              // The font size only applies to the terminal
+              showFontSize={isTerminalView}
+              onDecreaseFont={decrease}
+              onIncreaseFont={increase}
+              isFullscreen={isFullscreen}
+              onToggleFullscreen={canFullscreen ? toggleFullscreen : undefined}
+              views={switcherViews}
+              viewId={currentView.id}
+              onViewChange={changeView}
+              onOpenOverview={openOverview}
+              usageChip={
+                <HeaderUsageChip
+                  paneId={activeSession.paneId}
+                  hasAgent={activeSession.hasAgent}
+                  enabled={settings.showUsageChip}
+                  pollInterval={settings.pollInterval * 1000}
+                  isMobile={isMobile}
+                  onOpen={openOverviewOn}
+                />
+              }
+              viewPanelId={viewPanelId}
+              panelViews={panelViews}
+              sidePanelId={sidePanelView ? sidePanelId : null}
+              onTogglePanel={togglePanel}
+              menu={{
+                onOpenAbout: () => setAboutOpen(true),
+                onOpenHelp: () => setHelpOpen(true),
+                onOpenSettings: () => {
+                  setSettingsGroup(undefined)
+                  setSettingsOpen(true)
+                },
+                onCopyLink: shownLink ? copyLink : undefined,
+                onLogout: mux.caps.auth ? handleLogout : undefined,
+              }}
+            />
+          )}
           {/* Mounted before the banner, so the news is announced */}
           <div role="status" className="shrink-0">
             {appUpdate.stale && (
@@ -1387,7 +1430,8 @@ export default function App({
               </Banner>
             ))}
           {/* Split tab: pick the pane to stream (herdr) */}
-          {mux.caps.clientSideSelect &&
+          {!settings.zenMode &&
+            mux.caps.clientSideSelect &&
             activeSession.panes &&
             !overviewOpen && (
               <PaneStrip
@@ -1510,6 +1554,7 @@ export default function App({
                 <OverviewScreen
                   sessions={sessions}
                   groups={groups}
+                  crewMembers={crewMembers}
                   groupNoun={groupNoun}
                   ready={sessionsLoaded}
                   pollInterval={settings.pollInterval * 1000}
@@ -1526,6 +1571,9 @@ export default function App({
                     !readOnly && chatOffered ? startFromOverview : undefined
                   }
                   focusPane={overviewFocus}
+                  pinnedPanes={settings.pinnedPanes}
+                  onTogglePin={handleTogglePin}
+                  machineEnabled={!!mux.caps.machine}
                 />
               </div>
             )}
@@ -1579,6 +1627,9 @@ export default function App({
             historyOpen={historyOpen}
             keyboardVisible={keyboardVisible}
             quickActions={isMobile ? quickActions : undefined}
+            keysLayout={settings.keysLayout}
+            onKeysLayoutChange={(l) => updateSetting('keysLayout', l)}
+            leftHanded={settings.leftHanded}
           />
         </div>
       ) : (
@@ -1770,6 +1821,7 @@ export default function App({
           useServer={!!mux.caps.paneText && !readOnly}
           readBuffer={readBufferText}
           onCopied={onTerminalCopy}
+          onOpenFile={handleOpenFileFromSheet}
         />
       )}
       {toast && (

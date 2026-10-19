@@ -138,6 +138,7 @@ type streamHub struct {
 	// onShutdown runs once shutdown has closed every stream (it writes what
 	// the device store holds in memory).
 	onShutdown func()
+	crew       *CrewManager
 }
 
 type hubEntry struct {
@@ -145,10 +146,34 @@ type hubEntry struct {
 	role      role
 	deviceID  string
 	sessionID string
+	pane      string
 }
 
 func newStreamHub(max int) *streamHub {
 	return &streamHub{max: max}
+}
+
+func (h *streamHub) setPane(e *hubEntry, pane string) {
+	if h == nil || e == nil {
+		return
+	}
+	h.mu.Lock()
+	e.pane = pane
+	h.mu.Unlock()
+}
+
+func (h *streamHub) isStreamingPane(pane string) bool {
+	if h == nil || pane == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, s := range h.streams {
+		if s.pane == pane {
+			return true
+		}
+	}
+	return false
 }
 
 // add registers a stream of a client of role r (deviceID: its paired
@@ -301,7 +326,7 @@ func handleStream(w http.ResponseWriter, r *http.Request, m Mux, tokens *tokenSt
 		jsonError(w, "cross-site request rejected", http.StatusForbidden)
 		return
 	}
-	if origin := r.Header.Get("Origin"); origin != "" {
+	if origin := r.Header.Get("Origin"); origin != "" && tokens != nil {
 		u, err := url.Parse(origin)
 		if err != nil || u.Host == "" || !allowed.allows(r, u.Host) {
 			jsonError(w, "origin not allowed", http.StatusForbidden)
@@ -309,10 +334,16 @@ func handleStream(w http.ResponseWriter, r *http.Request, m Mux, tokens *tokenSt
 		}
 	}
 	q := r.URL.Query()
-	grant, ok := tokens.consume(q.Get("token"))
-	if !ok {
-		jsonError(w, "invalid or expired stream token", http.StatusUnauthorized)
-		return
+	var grant tokenInfo
+	if tokens != nil {
+		var ok bool
+		grant, ok = tokens.consume(q.Get("token"))
+		if !ok {
+			jsonError(w, "invalid or expired stream token", http.StatusUnauthorized)
+			return
+		}
+	} else {
+		grant.role = requestRole(r.Context())
 	}
 	// The token's grant, and the request's own: either one view-only makes
 	// the stream view-only.
@@ -325,6 +356,18 @@ func handleStream(w http.ResponseWriter, r *http.Request, m Mux, tokens *tokenSt
 		if a.SessionID != "" {
 			sessionID = a.SessionID
 		}
+	}
+	pane := q.Get("pane")
+	if pane == "" {
+		pane = q.Get("paneId")
+	}
+	if pane == "" {
+		jsonError(w, "pane is required", http.StatusBadRequest)
+		return
+	}
+	if memberID, origPane, ok := parseCrewPrefixedID(pane); ok && hub != nil && hub.crew != nil {
+		hub.crew.ProxyStream(w, r, memberID, origPane, view, deviceID, sessionID)
+		return
 	}
 	var va viewAttacher
 	if view {
@@ -339,11 +382,6 @@ func handleStream(w http.ResponseWriter, r *http.Request, m Mux, tokens *tokenSt
 			jsonErrorCode(w, "unsupported", "view-only streams are not supported by this backend", http.StatusNotImplemented)
 			return
 		}
-	}
-	pane := q.Get("pane")
-	if pane == "" {
-		jsonError(w, "pane is required", http.StatusBadRequest)
-		return
 	}
 	size := Size{Cols: queryDim(q, "cols", defaultTermCols), Rows: queryDim(q, "rows", defaultTermRows)}
 
@@ -403,6 +441,7 @@ func handleStream(w http.ResponseWriter, r *http.Request, m Mux, tokens *tokenSt
 		}
 		return
 	}
+	hub.setPane(entry, pane)
 	defer hub.remove(entry)
 	defer scancel(nil)
 

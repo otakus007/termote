@@ -56,6 +56,8 @@ interface Props {
   // How full the open pane's agent is (HeaderUsageChip); renders nothing
   // when it has nothing to show
   usageChip?: ReactNode
+  // Optional compact host resource pill
+  machineChip?: ReactNode
   viewPanelId: (id: string) => string
   // Desktop: views shown in the side panel, the one open, and its toggle
   panelViews?: ViewOption<string>[]
@@ -101,6 +103,7 @@ function MobileHeader(p: Props) {
         <ConnectionIndicator state={p.connectionState} onRetry={p.onRetry} />
       )}
       {p.usageChip}
+      {p.machineChip}
       <ViewMenu
         views={p.views}
         value={p.viewId}
@@ -171,6 +174,7 @@ function DesktopHeader(p: Props) {
           middle of the active tab (on the border) and of the others (4px up) */}
       <div className="mb-0.5 flex shrink-0 items-center gap-1">
         {p.usageChip}
+        {p.machineChip}
         <ViewSwitcher
           views={p.views}
           value={p.viewId}

@@ -8,13 +8,17 @@ import {
 } from 'react'
 import type { ViewProps } from '../app-views'
 import { agentLabel, chatInputAgent } from '../chat-agents'
+import { getOverviewPane } from '../hooks/use-agent-overview'
 import { useAgentPrompt } from '../hooks/use-agent-prompt'
 import { useAgentTranscript } from '../hooks/use-agent-transcript'
+import { followInFiles } from '../hooks/use-files'
 import type { TranscriptEntry } from '../hooks/use-mux-api'
 import type { StartRecord } from '../hooks/use-start-agent'
 import { toAgentStatus } from '../types/session'
 import { canStartAgent } from '../utils/agent-start'
+import type { LinkPath } from '../utils/markdown-links'
 import { AgentStatusBadge } from './agent-status-badge'
+import { CacheChip } from './cache-chip'
 import { ChatMessage, chatSide } from './chat-message'
 import { OpenTerminalButton } from './open-terminal-button'
 import { PromptCard } from './prompt-card'
@@ -69,7 +73,11 @@ function NoAgentChat({ mux, session, showView, agentStart }: ViewProps) {
         <StartAgentPanel
           kinds={mux.caps.agentStartCodex ? ['claude', 'codex'] : ['claude']}
           record={record}
-          onStart={(kind) => agentStart.start(paneId, kind)}
+          onStart={(kind, options) =>
+            options
+              ? agentStart.start(paneId, kind, options)
+              : agentStart.start(paneId, kind)
+          }
         />
       </Centered>
     )
@@ -247,6 +255,11 @@ function AgentChat({ session, showView, readOnly, agentStart }: ViewProps) {
 
   const visible = t.entries.slice(hidden)
   const layout = chatLayout(visible)
+  const handleOpenFile = (target: LinkPath) => {
+    if (!session.paneId) return
+    void followInFiles(session.paneId, target)
+    showView('files')
+  }
   // A split tab (herdr) names the pane too.
   const paneLabel =
     session.panes && session.panes.length > 1
@@ -260,6 +273,9 @@ function AgentChat({ session, showView, readOnly, agentStart }: ViewProps) {
           {agent} · {session.name}
           {paneLabel && ` · ${paneLabel}`}
         </span>
+        <CacheChip
+          cache={t.cache ?? getOverviewPane(session.paneId ?? '')?.cache}
+        />
         {t.error && <span className="text-warning">Reconnecting…</span>}
       </header>
       <section
@@ -289,6 +305,7 @@ function AgentChat({ session, showView, readOnly, agentStart }: ViewProps) {
             entry={e}
             showTime={layout[i].showTime}
             joinsNext={layout[i].joinsNext}
+            onOpenFile={handleOpenFile}
           />
         ))}
       </section>

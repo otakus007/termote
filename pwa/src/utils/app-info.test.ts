@@ -28,7 +28,7 @@ describe('APP_INFO', () => {
   })
 
   it('has repository', () => {
-    expect(APP_INFO.repository).toBe('https://github.com/lamngockhuong/termote')
+    expect(APP_INFO.repository).toBe('https://github.com/otakus007/termote')
   })
 
   it('has license MIT', () => {
@@ -37,10 +37,10 @@ describe('APP_INFO', () => {
 
   it('has links with changelog and issues', () => {
     expect(APP_INFO.links.changelog).toBe(
-      'https://github.com/lamngockhuong/termote/releases',
+      'https://github.com/otakus007/termote/releases',
     )
     expect(APP_INFO.links.issues).toBe(
-      'https://github.com/lamngockhuong/termote/issues',
+      'https://github.com/otakus007/termote/issues',
     )
   })
 

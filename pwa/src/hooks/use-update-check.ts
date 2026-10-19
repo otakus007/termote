@@ -3,7 +3,7 @@ import { useCallback, useState } from 'react'
 // The releases list, not releases/latest: `termote update` and the installer
 // pick from it (server/release_tags.go), and releases/latest can name a 0.x.
 const GITHUB_RELEASES =
-  'https://api.github.com/repos/lamngockhuong/termote/releases?per_page=30'
+  'https://api.github.com/repos/otakus007/termote/releases?per_page=30'
 const CACHE_KEY = 'termote-update-check'
 const CACHE_DURATION = 60 * 60 * 1000 // 1 hour
 

@@ -69,6 +69,9 @@ export interface SessionGroup {
   // Its place in a Herdr worktree group (linked worktree, or the
   // repository's own checkout) and the branch, when known.
   worktree?: { linked: boolean; branch?: string }
+  // Multi-machine crew member this group belongs to, when in crew mode.
+  machineId?: string
+  machineName?: string
 }
 
 // Default sessions (single session on fresh install)

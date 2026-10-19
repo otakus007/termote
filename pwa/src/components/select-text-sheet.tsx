@@ -8,6 +8,7 @@ import {
 } from 'react'
 import { usePaneText } from '../hooks/use-pane-text'
 import { copyText } from '../utils/copy-text'
+import { type LinkPath, splitTextFilePaths } from '../utils/markdown-links'
 import { splitUnsafe } from '../utils/unsafe-chars'
 import { Button } from './ui/button'
 import { Sheet } from './ui/sheet'
@@ -32,6 +33,7 @@ export function SelectTextSheet({
   useServer,
   readBuffer,
   onCopied,
+  onOpenFile,
 }: {
   onClose: () => void
   paneId: string | undefined
@@ -40,6 +42,7 @@ export function SelectTextSheet({
   // The terminal's buffer, when the server's text is not there
   readBuffer: () => string
   onCopied: (result: 'ok' | 'failed') => void
+  onOpenFile?: (target: LinkPath) => void
 }) {
   const { text, source, loading, truncated, canLoadMore, loadMore } =
     usePaneText({ paneId, useServer, readBuffer })
@@ -116,6 +119,29 @@ export function SelectTextSheet({
                   >
                     {p.mark}
                   </span>
+                ) : onOpenFile ? (
+                  splitTextFilePaths(p.text).map((seg, j) =>
+                    seg.type === 'path' ? (
+                      <button
+                        // biome-ignore lint/suspicious/noArrayIndexKey: segments never reorder
+                        key={`${i}-${j}`}
+                        type="button"
+                        onClick={() => {
+                          if (selectionRange()) return
+                          onOpenFile({
+                            path: seg.path,
+                            line: seg.line,
+                            col: seg.col,
+                          })
+                        }}
+                        className="cursor-pointer font-term text-accent underline underline-offset-2"
+                      >
+                        {seg.raw}
+                      </button>
+                    ) : (
+                      seg.value
+                    ),
+                  )
                 ) : (
                   p.text
                 ),

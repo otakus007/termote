@@ -633,4 +633,29 @@ describe('chatSide', () => {
     expect(chatSide({ id: '3', role: 'assistant', parts: [] })).toBe('agent')
     expect(chatSide({ id: '4', role: 'note', parts: [] })).toBe('other')
   })
+
+  it('turns inline file path tokens into tappable buttons when onOpenFile is provided', () => {
+    const onOpenFile = vi.fn()
+    render(
+      <ChatMessage
+        entry={assistant(
+          'See `server/push_watch.go:42:5` and [spec](docs/spec.md:10)',
+        )}
+        onOpenFile={onOpenFile}
+      />,
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: 'server/push_watch.go:42:5' }),
+    )
+    expect(onOpenFile).toHaveBeenCalledWith({
+      path: 'server/push_watch.go',
+      line: 42,
+      col: 5,
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'spec' }))
+    expect(onOpenFile).toHaveBeenLastCalledWith({
+      path: 'docs/spec.md',
+      line: 10,
+    })
+  })
 })

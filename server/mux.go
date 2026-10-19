@@ -142,6 +142,8 @@ type Caps struct {
 	// Set by the snapshot route for that role only: the stream refuses it
 	// with a 501 a browser's WebSocket cannot read.
 	ViewStream bool `json:"viewStream,omitempty"`
+	// Machine: the server samples host resources and serves /api/mux/machine*.
+	Machine bool `json:"machine,omitempty"`
 }
 
 // snapshotPeeker is a backend whose Snapshot has side effects (tmux makes
@@ -170,13 +172,18 @@ type Snapshot struct {
 	// InstanceID names this server (kept in its state dir): the PWA keeps
 	// open tabs and drafts on the device under it.
 	InstanceID string `json:"instanceId,omitempty"`
+	// CrewMembers lists federated Crew hosts (Lead + Members) when this node
+	// leads a multi-machine Crew.
+	CrewMembers []CrewMemberStatus `json:"crewMembers,omitempty"`
 }
 
 // Group is a tmux session or a herdr workspace.
 type Group struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Tabs []Tab  `json:"tabs"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Tabs        []Tab  `json:"tabs"`
+	MachineID   string `json:"machineId,omitempty"`
+	MachineName string `json:"machineName,omitempty"`
 	// Worktree: the group belongs to a Herdr worktree group, as the
 	// repository's own checkout or as a linked worktree.
 	Worktree *GroupWorktree `json:"worktree,omitempty"`
@@ -242,6 +249,46 @@ type AgentInfo struct {
 	SinceFirstSeen bool   `json:"sinceFirstSeen,omitempty"`
 }
 
+// stripSnapshotDirs clears ProcessInfo.Cwd across all groups, tabs, and panes
+// in s so a view-only client never receives host working directory paths.
+func stripSnapshotDirs(s *Snapshot) {
+	if s == nil || len(s.Groups) == 0 {
+		return
+	}
+	groups := make([]Group, len(s.Groups))
+	for i, g := range s.Groups {
+		ng := g
+		if len(g.Tabs) > 0 {
+			ng.Tabs = make([]Tab, len(g.Tabs))
+			for j, t := range g.Tabs {
+				nt := t
+				if len(t.Processes) > 0 {
+					nt.Processes = make([]ProcessInfo, len(t.Processes))
+					for k, proc := range t.Processes {
+						proc.Cwd = ""
+						nt.Processes[k] = proc
+					}
+				}
+				if len(t.Panes) > 0 {
+					nt.Panes = make([]Pane, len(t.Panes))
+					for k, p := range t.Panes {
+						np := p
+						if p.Process != nil {
+							cp := *p.Process
+							cp.Cwd = ""
+							np.Process = &cp
+						}
+						nt.Panes[k] = np
+					}
+				}
+				ng.Tabs[j] = nt
+			}
+		}
+		groups[i] = ng
+	}
+	s.Groups = groups
+}
+
 // inputError is a client mistake; its message is safe to return verbatim.
 type inputError string
 
@@ -304,6 +351,12 @@ func registerMuxRoutes(mux *http.ServeMux, m Mux, tokens *tokenStore, uploads *u
 			jsonError(w, msg, http.StatusForbidden)
 			return
 		}
+		q := r.URL.Query()
+		if push != nil {
+			if viewing := q.Get("viewing"); viewing != "" {
+				push.recordViewing(viewing)
+			}
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), muxTimeout)
 		defer cancel()
 		gen := agent.activity.begin()
@@ -311,7 +364,7 @@ func registerMuxRoutes(mux *http.ServeMux, m Mux, tokens *tokenStore, uploads *u
 		// page is open, so a closed default session stays closed.
 		read := m.Snapshot
 		switch {
-		case r.URL.Query().Get("peek") == "1":
+		case q.Get("peek") == "1":
 			read = func(ctx context.Context) (Snapshot, error) { return peekSnapshot(ctx, m) }
 		case isViewOnly(r):
 			// A view-only client makes nothing either (tmux's default
@@ -346,9 +399,16 @@ func registerMuxRoutes(mux *http.ServeMux, m Mux, tokens *tokenStore, uploads *u
 		snap.Caps.Push = push != nil
 		snap.Caps.Devices = agent.devices
 		snap.Caps.Signins = agent.signins
+		snap.Caps.Machine = agent.machine != nil
 		snap.InstanceID = agent.instanceID
 		if snap.Groups == nil {
 			snap.Groups = []Group{}
+		}
+		if agent.crew != nil {
+			snap = agent.crew.AugmentSnapshot(snap)
+		}
+		if isViewOnly(r) {
+			stripSnapshotDirs(&snap)
 		}
 		jsonOK(w, snap)
 	})

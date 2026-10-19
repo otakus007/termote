@@ -642,3 +642,93 @@ describe('agentCards', () => {
     ])
   })
 })
+
+describe('OverviewScreen, multi-machine crew filtering', () => {
+  beforeEach(() => {
+    resetAgentOverview()
+    resetActivityLog()
+    mockFetchOverview.mockResolvedValue({ serverNow: 'x', panes: [] })
+    mockFetchActivity.mockResolvedValue({ events: [] })
+  })
+
+  it('hides machine filter chips in single-machine mode and renders them in multi-machine mode', () => {
+    renderScreen()
+    expect(screen.queryByTestId('machine-chip-all')).toBeNull()
+    expect(screen.queryByTestId('agent-machine-badge')).toBeNull()
+  })
+
+  it('filters agent cards by machine chip and shows machine badges when multiple machines are present', () => {
+    const multiSessions: Session[] = [
+      tab('t-local', 'local-g1', [
+        {
+          id: 'p-local',
+          label: 'Local Claude',
+          hasAgent: true,
+          agentName: 'claude',
+          agentStatus: 'working',
+        },
+      ]),
+      tab('t-remote', 'c:gpu-1/remote-g1', [
+        {
+          id: 'c:gpu-1/p-remote',
+          label: 'Remote Codex',
+          hasAgent: true,
+          agentName: 'codex',
+          agentStatus: 'idle',
+        },
+      ]),
+    ]
+    const multiGroups: SessionGroup[] = [
+      {
+        id: 'local-g1',
+        name: 'Local Repo',
+        machineId: 'local',
+        machineName: 'macbook-lead',
+      },
+      {
+        id: 'c:gpu-1/remote-g1',
+        name: 'Remote GPU Repo',
+        machineId: 'gpu-1',
+        machineName: 'gpu-box',
+      },
+    ]
+    renderScreen({
+      sessions: multiSessions,
+      groups: multiGroups,
+      crewMembers: [
+        {
+          id: 'gpu-1',
+          name: 'gpu-box',
+          role: 'member',
+          status: 'online',
+          latencyMs: 12,
+        },
+      ],
+    })
+
+    expect(screen.getByTestId('machine-chip-all')).toBeInTheDocument()
+    expect(screen.getByTestId('machine-chip-local')).toHaveTextContent(
+      'macbook-lead',
+    )
+    expect(screen.getByTestId('machine-chip-gpu-1')).toHaveTextContent(
+      'gpu-box',
+    )
+    expect(
+      screen.getAllByTestId('agent-machine-badge').map((el) => el.textContent),
+    ).toEqual(['macbook-lead', 'gpu-box'])
+    expect(cardNames()).toHaveLength(2)
+
+    fireEvent.click(screen.getByTestId('machine-chip-gpu-1'))
+    expect(cardNames()).toEqual([
+      'Open terminal: Codex, Idle, Remote GPU Repo / t-remote',
+    ])
+
+    fireEvent.click(screen.getByTestId('machine-chip-local'))
+    expect(cardNames()).toEqual([
+      'Open chat: Claude Code, Working, Local Repo / t-local',
+    ])
+
+    fireEvent.click(screen.getByTestId('machine-chip-all'))
+    expect(cardNames()).toHaveLength(2)
+  })
+})

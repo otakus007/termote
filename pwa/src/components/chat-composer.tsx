@@ -19,6 +19,7 @@ import { useAgentPrompt } from '../hooks/use-agent-prompt'
 import { useAgentTranscript } from '../hooks/use-agent-transcript'
 import { useChatAttachments } from '../hooks/use-chat-attachments'
 import { AgentRequestError, sendAgentMessage } from '../hooks/use-mux-api'
+import { QUICK_REPLIES_DEFAULT, useSettings } from '../hooks/use-settings'
 import { toAgentStatus } from '../types/session'
 import { loadDraft, saveDraft } from '../utils/chat-draft'
 import {
@@ -38,9 +39,10 @@ import { TERMINAL_VIEW_ID } from '../view-ids'
 import { ChatAttachments } from './chat-attachments'
 import { OpenTerminalButton } from './open-terminal-button'
 import { PromptCard, WaitingCard } from './prompt-card'
+import { QuickRepliesBar } from './quick-replies-bar'
 import { SlashCommandList, slashOptionId } from './slash-command-list'
 import { Banner, type BannerVariant } from './ui/banner'
-import { IconButton } from './ui/button'
+import { Button, IconButton } from './ui/button'
 import { ConfirmDialog } from './ui/confirm-dialog'
 
 // The server's limit on a message, in UTF-8 bytes.
@@ -137,6 +139,7 @@ export function ChatComposer({
   const t = useAgentTranscript(session.paneId)
   const status = toAgentStatus(t.status)
   const p = useAgentPrompt(session.paneId, status)
+  const { settings } = useSettings()
   // Blocked with no dialog the server can read. Only once a dialog read came
   // back: before it, or as an answer settles, this would flash.
   const waiting = status === 'blocked' && p.loaded && !p.prompt
@@ -247,6 +250,7 @@ export function ChatComposer({
     message: string,
     confirmed = false,
     imageIds: string[] = [],
+    sendNow = false,
   ) => {
     if (sending || !t.cursor) return
     // With images the agent receives "[Image #1] /cmd": text, not a command.
@@ -269,7 +273,11 @@ export function ChatComposer({
     setSending(true)
     setNotice(null)
     try {
-      await sendAgentMessage(paneId, message, t.cursor, imageIds)
+      if (sendNow) {
+        await sendAgentMessage(paneId, message, t.cursor, imageIds, true)
+      } else {
+        await sendAgentMessage(paneId, message, t.cursor, imageIds)
+      }
       setText('')
       setCaret(0)
       saveDraft(latest.current.paneId, '')
@@ -291,9 +299,9 @@ export function ChatComposer({
     }
   }
 
-  const send = () => {
+  const send = (sendNow = false) => {
     if (!canSend) return
-    submit(dollar ? closeTrailingSkill(text) : text, false, images.ids)
+    submit(dollar ? closeTrailingSkill(text) : text, false, images.ids, sendNow)
   }
 
   const attach = async () => {
@@ -366,10 +374,10 @@ export function ChatComposer({
       return
     }
     // On a phone Enter is a new line and the button sends; with a keyboard,
-    // Ctrl/Cmd+Enter sends.
+    // Ctrl/Cmd+Enter sends (Ctrl/Cmd+Shift+Enter sends immediately while working).
     if (e.key === 'Enter' && !isMobile && (e.ctrlKey || e.metaKey)) {
       e.preventDefault()
-      send()
+      send(status === 'working' && e.shiftKey)
     }
   }
 
@@ -472,6 +480,17 @@ export function ChatComposer({
         onRemove={images.remove}
         disabled={sending}
       />
+      <QuickRepliesBar
+        replies={settings.quickReplies ?? QUICK_REPLIES_DEFAULT}
+        agentName={session.agentName}
+        disabled={sending || !t.cursor}
+        onSendReply={(reply) => {
+          void submit(reply)
+        }}
+        onRunShortcut={(sc) => {
+          void submit(sc.command)
+        }}
+      />
       <div className="flex items-end gap-2 p-2">
         {uploadsOn && (
           <IconButton
@@ -504,11 +523,23 @@ export function ChatComposer({
           placeholder={isMobile ? 'Message' : 'Message (Ctrl+Enter to send)'}
           className="min-h-touch min-w-0 flex-1 resize-none rounded-control border border-border bg-bg px-3 py-2 text-[15px] text-fg focus-visible:border-accent focus-visible:outline-none"
         />
+        {status === 'working' && canSend && (
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={!canSend}
+            onClick={() => send(true)}
+            aria-label="Send now"
+            title="Send immediately while the agent is working (Ctrl+Shift+Enter)"
+          >
+            Send now
+          </Button>
+        )}
         <IconButton
           aria-label="Send"
           variant="primary"
           disabled={!canSend}
-          onClick={send}
+          onClick={() => send()}
         >
           <SendHorizontal size={18} aria-hidden="true" />
         </IconButton>

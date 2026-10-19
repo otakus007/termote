@@ -1,22 +1,83 @@
 import { describe, expect, it } from 'vitest'
 import {
   findAnchor,
+  isHtmlPath,
   isMarkdownPath,
   isMermaidInfo,
+  isPdfPath,
+  parseFilePathToken,
   rehypeHeadingIds,
   rehypeMermaidIndex,
   resolveLink,
   slugger,
   splitFrontMatter,
+  splitTextFilePaths,
   textOf,
 } from './markdown-links'
 
-describe('isMarkdownPath', () => {
+describe('isMarkdownPath / isHtmlPath / isPdfPath', () => {
   it.each(['README.md', 'docs/a.MARKDOWN', 'x/page.mdx'])('%s', (p) => {
     expect(isMarkdownPath(p)).toBe(true)
   })
   it.each(['a.txt', 'md', 'a.md.bak', 'a.mdown'])('not %s', (p) => {
     expect(isMarkdownPath(p)).toBe(false)
+  })
+  it('detects html and pdf paths', () => {
+    expect(isHtmlPath('index.html')).toBe(true)
+    expect(isHtmlPath('docs/page.HTM')).toBe(true)
+    expect(isHtmlPath('index.html.bak')).toBe(false)
+    expect(isPdfPath('spec.pdf')).toBe(true)
+    expect(isPdfPath('docs/REPORT.PDF')).toBe(true)
+    expect(isPdfPath('spec.pdf.txt')).toBe(false)
+  })
+})
+
+describe('parseFilePathToken and splitTextFilePaths', () => {
+  it('parses workspace file paths with optional line and col', () => {
+    expect(parseFilePathToken('server/push_watch.go:42')).toEqual({
+      path: 'server/push_watch.go',
+      line: 42,
+    })
+    expect(parseFilePathToken('./pwa/src/App.tsx:120:5')).toEqual({
+      path: 'pwa/src/App.tsx',
+      line: 120,
+      col: 5,
+    })
+    expect(parseFilePathToken('README.md')).toEqual({
+      path: 'README.md',
+    })
+  })
+
+  it('rejects URLs, parent traversal, and unknown extensions', () => {
+    expect(parseFilePathToken('https://example.com/a.js:10')).toBeNull()
+    expect(parseFilePathToken('../secret.go:1')).toBeNull()
+    expect(parseFilePathToken('a/../../secret.go:1')).toBeNull()
+    expect(parseFilePathToken('localhost:8080')).toBeNull()
+    expect(parseFilePathToken('file.unknownext:10')).toBeNull()
+  })
+
+  it('splits plain text around file path tokens', () => {
+    expect(
+      splitTextFilePaths(
+        'Check server/push_watch.go:42 and README.md:10 or https://x.dev/a.ts:1.',
+      ),
+    ).toEqual([
+      { type: 'text', value: 'Check ' },
+      {
+        type: 'path',
+        raw: 'server/push_watch.go:42',
+        path: 'server/push_watch.go',
+        line: 42,
+      },
+      { type: 'text', value: ' and ' },
+      {
+        type: 'path',
+        raw: 'README.md:10',
+        path: 'README.md',
+        line: 10,
+      },
+      { type: 'text', value: ' or https://x.dev/a.ts:1.' },
+    ])
   })
 })
 

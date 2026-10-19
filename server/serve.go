@@ -80,6 +80,19 @@ type serveConfig struct {
 	// InstanceDir keeps the server's instance id (the snapshot's
 	// instanceId); empty gives one that lasts until the server stops.
 	InstanceDir string
+	// LaunchersDir holds custom launcher recipes, recent commands, and
+	// favourite/recent folders (<stateDir>/launchers).
+	LaunchersDir string
+	// BeaconsDir holds lifecycle beacon files (<stateDir>/beacons).
+	BeaconsDir string
+	// MachineDir holds the 24h machine resource history and sustained load
+	// alert rules (<stateDir>/machine).
+	MachineDir string
+	// CrewDir holds multi-machine Crew federation certificates, state, and
+	// Deputy Warrant (<stateDir>/crew).
+	CrewDir string
+	// NodeName overrides the local host display name in a multi-machine Crew.
+	NodeName string
 	// LocalSocketDir holds the local socket the CLI reaches a native
 	// server on without the password (<stateDir>/run; Windows uses a named
 	// pipe and ignores it); empty opens none (the container, tests).
@@ -392,8 +405,18 @@ func buildServer(cfg serveConfig, m Mux) (http.Handler, *streamHub, *pushStore, 
 // buildServerWith is buildServer that also returns the activity tracker, for
 // the push watcher to feed.
 func buildServerWith(cfg serveConfig, m Mux) (http.Handler, *streamHub, *pushStore, *activityTracker, error) {
+	h, hub, push, activity, _, err := buildServerFull(cfg, m)
+	return h, hub, push, activity, err
+}
+
+func buildServerFull(cfg serveConfig, m Mux) (http.Handler, *streamHub, *pushStore, *activityTracker, *machineCollector, error) {
+	h, hub, push, activity, machine, _, err := buildServerWithCrew(cfg, m)
+	return h, hub, push, activity, machine, err
+}
+
+func buildServerWithCrew(cfg serveConfig, m Mux) (http.Handler, *streamHub, *pushStore, *activityTracker, *machineCollector, *CrewManager, error) {
 	if err := validateConfig(cfg); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	mux := http.NewServeMux()
 	tokenStore := newStreamTokenStore()
@@ -416,6 +439,8 @@ func buildServerWith(cfg serveConfig, m Mux) (http.Handler, *streamHub, *pushSto
 		var err error
 		if push, err = newPushStore(cfg.PushDir, cfg.User, cfg.Pass, cfg.NoAuth); err != nil {
 			log.Printf("push notifications disabled: %v", err)
+		} else {
+			push.setStreamChecker(hub.isStreamingPane)
 		}
 	}
 	var devices *deviceAuth
@@ -433,14 +458,60 @@ func buildServerWith(cfg serveConfig, m Mux) (http.Handler, *streamHub, *pushSto
 		devices.store.sessionAlive = sessions.alive
 		sessions.onEnd = func(id string) { devices.codes.dropCreator(sessionCreator(id)) }
 	}
+	launchersDir := cfg.LaunchersDir
+	if launchersDir == "" && cfg.InstanceDir != "" {
+		launchersDir = filepath.Join(cfg.InstanceDir, "launchers")
+	}
+	var launchers *launchersStore
+	if launchersDir != "" {
+		var err error
+		if launchers, err = newLaunchersStore(launchersDir); err != nil {
+			log.Printf("launchers store disabled: %v", err)
+		}
+	}
+	if cfg.BeaconsDir != "" {
+		defaultBeaconsDir = cfg.BeaconsDir
+	} else if cfg.InstanceDir != "" {
+		defaultBeaconsDir = filepath.Join(cfg.InstanceDir, "beacons")
+	}
+	machineDir := cfg.MachineDir
+	if machineDir == "" && cfg.InstanceDir != "" {
+		machineDir = filepath.Join(cfg.InstanceDir, "machine")
+	}
+	machine, err := newMachineCollector(machineDir, push)
+	if err != nil {
+		log.Printf("machine persistence disabled: %v", err)
+		machine, _ = newMachineCollector("", push)
+	}
 	agent := registerMuxRoutes(mux, m, tokenStore, uploads, push)
 	agent.instanceID = loadInstanceID(cfg.InstanceDir)
 	agent.devices = devices != nil
 	agent.signins = sessions != nil
+	agent.launchers = launchers
+	agent.machine = machine
+
+	crewDir := cfg.CrewDir
+	if crewDir == "" && cfg.InstanceDir != "" {
+		crewDir = filepath.Join(cfg.InstanceDir, "crew")
+	}
+	var crew *CrewManager
+	if crewDir != "" {
+		if crewStore, cerr := NewCrewStore(crewDir, cfg.NodeName); cerr != nil {
+			log.Printf("crew federation disabled: %v", cerr)
+		} else {
+			crew = NewCrewManager(crewStore, m, mux, agent, machine, hub, agent.activity, allowed)
+			agent.crew = crew
+			machine.crew = crew
+			hub.crew = crew
+		}
+	}
+
+	registerLaunchersRoutes(mux, launchers, allowed)
+	registerMachineRoutes(mux, machine, allowed)
 	registerDeviceRoutes(mux, devices, allowed)
 	registerSigninRoutes(mux, sessions, devices, allowed)
 	registerLoginLinkRoutes(mux, sessions)
-	registerPushRoutes(mux, push)
+	registerPushRoutes(mux, push, allowed)
 	registerStreamRoutes(mux, m, tokenStore, allowed, hub, agent.activity)
 	if z, ok := m.(*zellijMux); ok {
 		// A Zellij group's ids change with its session's name.
@@ -449,8 +520,8 @@ func buildServerWith(cfg serveConfig, m Mux) (http.Handler, *streamHub, *pushSto
 	// The upload store and the trash are never read through the Files view
 	// either: with a pane in the home dir, a deleted .env would otherwise
 	// be served under its random name, and the records name other repos.
-	files := registerFilesRoutes(mux, m, allowed, append(slices.Clone(cfg.FilesDenyDirs), cfg.UploadDir, cfg.TrashDir))
-	files.writeDeny = filesDenyDirs(append(cfg.FilesWriteDenyDirs, cfg.UploadDir, cfg.TrashDir)...)
+	files := registerFilesRoutes(mux, m, allowed, append(slices.Clone(cfg.FilesDenyDirs), cfg.UploadDir, cfg.TrashDir, launchersDir, defaultBeaconsDir, machineDir, crewDir))
+	files.writeDeny = filesDenyDirs(append(slices.Clone(cfg.FilesWriteDenyDirs), cfg.UploadDir, cfg.TrashDir, launchersDir, defaultBeaconsDir, machineDir, crewDir)...)
 	files.homeDirs = cfg.ViewHomeDirs
 	if cfg.TrashDir != "" {
 		var err error
@@ -459,7 +530,7 @@ func buildServerWith(cfg serveConfig, m Mux) (http.Handler, *streamHub, *pushSto
 		}
 	}
 	agent.registerCommandsRoute(mux, files, allowed)
-	registerGroupRoutes(mux, m, files.deny)
+	registerGroupRoutes(mux, m, files.deny, launchers)
 	registerReorderRoutes(mux, m)
 	registerWorktreeRoutes(mux, m, files.git, allowed)
 	// Unknown /api/ paths get JSON 404 instead of the SPA fallback.
@@ -476,6 +547,9 @@ func buildServerWith(cfg serveConfig, m Mux) (http.Handler, *streamHub, *pushSto
 	mux.Handle("/", spaHandler(pwa))
 
 	var handler http.Handler = mux
+	if crew != nil {
+		handler = crew.WrapMux(mux)
+	}
 	if !cfg.NoAuth {
 		handler = newBasicAuth(cfg.User, cfg.Pass, devices, sessions, handler)
 	}
@@ -485,7 +559,7 @@ func buildServerWith(cfg serveConfig, m Mux) (http.Handler, *streamHub, *pushSto
 	handler = securityHeaders(pwa, handler)
 	handler = hostGuard(allowed, handler)
 	handler = isolationHeaders(handler)
-	return readDeadline(noCacheMiddleware(handler)), hub, push, agent.activity, nil
+	return readDeadline(noCacheMiddleware(handler)), hub, push, agent.activity, machine, crew, nil
 }
 
 // requestReadTimeout bounds reading one request, its body included:
@@ -591,13 +665,26 @@ func serveAndPublish(ctx context.Context, cfg serveConfig, m Mux, ln net.Listene
 // runServer serves on ln until ctx is cancelled, then stops accepting
 // requests, closes every terminal stream and waits for their processes.
 func runServer(ctx context.Context, cfg serveConfig, m Mux, ln net.Listener) error {
-	handler, hub, push, activity, err := buildServerWith(cfg, m)
+	handler, hub, push, activity, machine, crew, err := buildServerWithCrew(cfg, m)
 	if err != nil {
 		ln.Close()
 		return err
 	}
 	// Here, not in buildServer: a handler built for a test sends nothing.
-	startPushWatcher(ctx, m, push, activity)
+	pw := startPushWatcher(ctx, m, push, activity)
+	if machine != nil {
+		if pw != nil {
+			machine.setEmitPush(pw.EmitExternal)
+		}
+		machine.Start(ctx)
+	}
+	if crew != nil {
+		crew.Start(ctx)
+		defer crew.Close()
+		if crew.Store() != nil {
+			ln = newTLSOrHTTPListener(ln, crew.Store().PeerTLSConfig())
+		}
+	}
 	pwa := "embedded"
 	if cfg.PWADir != "" {
 		pwa, _ = filepath.Abs(cfg.PWADir)
@@ -618,6 +705,9 @@ func runServer(ctx context.Context, cfg serveConfig, m Mux, ln net.Listener) err
 	case err := <-errCh:
 		srv.Close()
 		cleanupSocket()
+		if machine != nil {
+			_ = machine.Close()
+		}
 		return err
 	case <-ctx.Done():
 	}
@@ -631,6 +721,11 @@ func runServer(ctx context.Context, cfg serveConfig, m Mux, ln net.Listener) err
 	// Shutdown has closed the socket's listener: the CLI finds no socket
 	// rather than one nothing answers on.
 	cleanupSocket()
+	if machine != nil {
+		if err := machine.Close(); err != nil {
+			log.Printf("machine shutdown: %v", err)
+		}
+	}
 	if err := hub.shutdown(sctx); err != nil {
 		log.Printf("terminal streams still open at exit: %v", err)
 	}
@@ -1153,8 +1248,9 @@ func newBasicAuth(user, pass string, dev *deviceAuth, sessions *sessionAuth, nex
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip auth for PWA public paths (manifest, service worker)
-		if isPWAPublicPath(r.URL.Path) {
+		// Skip browser auth for PWA public paths and /crew/v1/* peer routes
+		// (which enforce their own mTLS + ECDSA P-256 signature auth).
+		if isPWAPublicPath(r.URL.Path) || strings.HasPrefix(r.URL.Path, "/crew/v1/") {
 			next.ServeHTTP(w, r)
 			return
 		}

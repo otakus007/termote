@@ -1,6 +1,7 @@
 import { useCallback, useSyncExternalStore } from 'react'
 import { onPaneRemap } from '../utils/pane-remap'
 import {
+  type AgentCacheInfo,
   AgentRequestError,
   fetchTranscript,
   type TranscriptEntry,
@@ -29,6 +30,7 @@ export interface TranscriptState {
   cursor?: string
   // Reads older entries; undefined once the start is reached
   before?: string
+  cache?: AgentCacheInfo
   loaded: boolean
   loadingOlder: boolean
   error?: TranscriptError

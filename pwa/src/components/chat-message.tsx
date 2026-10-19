@@ -1,8 +1,16 @@
 import { ChevronRight, ImageIcon } from 'lucide-react'
-import { type ComponentProps, memo, type ReactNode, useRef } from 'react'
+import {
+  type ComponentProps,
+  createContext,
+  memo,
+  type ReactNode,
+  useContext,
+  useRef,
+} from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { TranscriptEntry, TranscriptPart } from '../hooks/use-mux-api'
+import { type LinkPath, parseFilePathToken } from '../utils/markdown-links'
 import { htmlAsText, safeUrl } from '../utils/markdown-safety'
 import { CopyButton } from './chat-copy-button'
 import { ToolCard, toolDot } from './chat-tool-card'
@@ -12,9 +20,28 @@ import { ToolCard, toolDot } from './chat-tool-card'
 // links open only for http(s), and images never load: an image URL can carry
 // data out without a click.
 
+const OpenFileContext = createContext<((target: LinkPath) => void) | undefined>(
+  undefined,
+)
+
 function MdLink({ href, children }: ComponentProps<'a'>) {
+  const onOpenFile = useContext(OpenFileContext)
   const u = safeUrl(href)
-  if (!u) return <span>{children}</span>
+  if (!u) {
+    const fileTarget = onOpenFile && href ? parseFilePathToken(href) : null
+    if (fileTarget && onOpenFile) {
+      return (
+        <button
+          type="button"
+          onClick={() => onOpenFile(fileTarget)}
+          className="cursor-pointer font-mono text-accent underline underline-offset-2"
+        >
+          {children}
+        </button>
+      )
+    }
+    return <span>{children}</span>
+  }
   return (
     <a
       href={href}
@@ -26,6 +53,40 @@ function MdLink({ href, children }: ComponentProps<'a'>) {
     >
       {children}
     </a>
+  )
+}
+
+function MdCode({
+  className,
+  children,
+  node: _node,
+  ...rest
+}: ComponentProps<'code'> & { node?: unknown }) {
+  const onOpenFile = useContext(OpenFileContext)
+  const isBlock = Boolean(className?.startsWith('language-'))
+  const text = typeof children === 'string' ? children : undefined
+  const fileTarget =
+    !isBlock && onOpenFile && text && !text.includes('\n')
+      ? parseFilePathToken(text.trim())
+      : null
+  if (fileTarget && onOpenFile) {
+    return (
+      <button
+        type="button"
+        onClick={() => onOpenFile(fileTarget)}
+        title={`Open ${fileTarget.path}${fileTarget.line ? `:${fileTarget.line}` : ''}`}
+        className="cursor-pointer rounded border border-border bg-surface-raised px-1 font-mono text-[0.88em] text-accent underline decoration-accent/50 underline-offset-2 hover:bg-surface"
+      >
+        <code className={className} {...rest}>
+          {children}
+        </code>
+      </button>
+    )
+  }
+  return (
+    <code className={className} {...rest}>
+      {children}
+    </code>
   )
 }
 
@@ -73,18 +134,26 @@ function MdPre({
   )
 }
 
-const MD_COMPONENTS = { a: MdLink, img: MdImage, pre: MdPre }
+const MD_COMPONENTS = { a: MdLink, code: MdCode, img: MdImage, pre: MdPre }
 
-export function MarkdownText({ text }: { text: string }) {
+export function MarkdownText({
+  text,
+  onOpenFile,
+}: {
+  text: string
+  onOpenFile?: (target: LinkPath) => void
+}) {
   return (
-    <div className="min-w-0 break-words leading-relaxed [&_:not(pre)>code]:rounded [&_:not(pre)>code]:box-decoration-clone [&_:not(pre)>code]:border [&_:not(pre)>code]:border-border [&_:not(pre)>code]:bg-surface-raised [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:font-mono [&_:not(pre)>code]:text-[0.88em] [&_h1]:mt-3 [&_h1]:font-semibold [&_h2]:mt-3 [&_h2]:font-semibold [&_h3]:mt-2 [&_h3]:font-semibold [&_li]:ml-5 [&_li+li]:mt-1 [&_ol]:my-2 [&_ol]:list-decimal [&_p+p]:mt-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-control [&_pre]:border [&_pre]:border-border [&_pre]:bg-surface-raised [&_pre]:p-2 [&_pre]:pr-10 pointer-coarse:[&_pre]:py-3.5 pointer-coarse:[&_pre]:pr-12 [&_pre]:font-mono [&_pre]:text-[12px] [&_pre]:leading-[1.6] [&_ul]:my-2 [&_table]:block [&_table]:overflow-x-auto [&_td]:border [&_td]:border-border [&_td]:px-1.5 [&_th]:border [&_th]:border-border [&_th]:px-1.5 [&_ul]:list-disc">
-      <Markdown
-        remarkPlugins={[remarkGfm, htmlAsText]}
-        components={MD_COMPONENTS}
-      >
-        {text}
-      </Markdown>
-    </div>
+    <OpenFileContext.Provider value={onOpenFile}>
+      <div className="min-w-0 break-words leading-relaxed [&_:not(pre)>code]:rounded [&_:not(pre)>code]:box-decoration-clone [&_:not(pre)>code]:border [&_:not(pre)>code]:border-border [&_:not(pre)>code]:bg-surface-raised [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:font-mono [&_:not(pre)>code]:text-[0.88em] [&_h1]:mt-3 [&_h1]:font-semibold [&_h2]:mt-3 [&_h2]:font-semibold [&_h3]:mt-2 [&_h3]:font-semibold [&_li]:ml-5 [&_li+li]:mt-1 [&_ol]:my-2 [&_ol]:list-decimal [&_p+p]:mt-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-control [&_pre]:border [&_pre]:border-border [&_pre]:bg-surface-raised [&_pre]:p-2 [&_pre]:pr-10 pointer-coarse:[&_pre]:py-3.5 pointer-coarse:[&_pre]:pr-12 [&_pre]:font-mono [&_pre]:text-[12px] [&_pre]:leading-[1.6] [&_ul]:my-2 [&_table]:block [&_table]:overflow-x-auto [&_td]:border [&_td]:border-border [&_td]:px-1.5 [&_th]:border [&_th]:border-border [&_th]:px-1.5 [&_ul]:list-disc">
+        <Markdown
+          remarkPlugins={[remarkGfm, htmlAsText]}
+          components={MD_COMPONENTS}
+        >
+          {text}
+        </Markdown>
+      </div>
+    </OpenFileContext.Provider>
   )
 }
 
@@ -124,7 +193,13 @@ function ImageChip() {
   )
 }
 
-function Part({ part }: { part: TranscriptPart }) {
+function Part({
+  part,
+  onOpenFile,
+}: {
+  part: TranscriptPart
+  onOpenFile?: (target: LinkPath) => void
+}) {
   switch (part.kind) {
     case 'tool':
       return <ToolCard part={part} />
@@ -140,7 +215,7 @@ function Part({ part }: { part: TranscriptPart }) {
     default:
       return (
         <>
-          <MarkdownText text={part.text ?? ''} />
+          <MarkdownText text={part.text ?? ''} onOpenFile={onOpenFile} />
           <Clipped show={part.clipped} />
         </>
       )
@@ -208,10 +283,12 @@ export const ChatMessage = memo(function ChatMessage({
   entry,
   showTime,
   joinsNext,
+  onOpenFile,
 }: {
   entry: TranscriptEntry
   showTime?: boolean
   joinsNext?: boolean
+  onOpenFile?: (target: LinkPath) => void
 }) {
   if (entry.role === 'summary') {
     return (
@@ -281,7 +358,7 @@ export const ChatMessage = memo(function ChatMessage({
           dot={part.kind === 'tool' ? toolDot(part) : 'bg-fg-subtle'}
           line={i < last || !!joinsNext}
         >
-          <Part part={part} />
+          <Part part={part} onOpenFile={onOpenFile} />
         </Step>
       ))}
       {!joinsNext && answer && (

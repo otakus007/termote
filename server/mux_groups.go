@@ -35,19 +35,25 @@ var (
 // at a time, so a client that repeats a request does not open shells in
 // parallel.
 type groupAPI struct {
-	m    Mux
-	deny []string
-	mu   sync.Mutex
+	m         Mux
+	deny      []string
+	launchers *launchersStore
+	mu        sync.Mutex
 }
 
 // registerGroupRoutes mounts the group routes. deny is the files routes'
 // deny list (system dirs, termote's own dirs, both as given and resolved): a
 // new group never starts in one of them. Patterns carry no method so a wrong
 // one gets a JSON 405.
-func registerGroupRoutes(mux *http.ServeMux, m Mux, deny []string) {
-	g := &groupAPI{m: m, deny: deny}
+func registerGroupRoutes(mux *http.ServeMux, m Mux, deny []string, launchers ...*launchersStore) *groupAPI {
+	var ls *launchersStore
+	if len(launchers) > 0 {
+		ls = launchers[0]
+	}
+	g := &groupAPI{m: m, deny: deny, launchers: ls}
 	mux.HandleFunc("/api/mux/groups", g.handleCreate)
 	mux.HandleFunc("/api/mux/groups/{id}", g.handleGroup)
+	return g
 }
 
 func (g *groupAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +87,9 @@ func (g *groupAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		groupError(w, g.m, "new group", err)
 		return
+	}
+	if g.launchers != nil && cwd != "" {
+		_ = g.launchers.recordRecentFolder(cwd)
 	}
 	jsonOK(w, map[string]any{"ok": true, "id": id})
 }

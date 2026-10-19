@@ -79,6 +79,10 @@ func runServe(args []string) int {
 	// view, and which does not roam on Windows (a private key).
 	cfg.PushDir = filepath.Join(c.stateDir(), "push")
 	cfg.DevicesDir = filepath.Join(c.stateDir(), "devices")
+	cfg.LaunchersDir = filepath.Join(c.stateDir(), "launchers")
+	cfg.BeaconsDir = filepath.Join(c.stateDir(), "beacons")
+	cfg.MachineDir = filepath.Join(c.stateDir(), "machine")
+	cfg.CrewDir = filepath.Join(c.stateDir(), "crew")
 	cfg.InstanceDir = c.stateDir()
 	if cfg.LocalSocketDir != "" {
 		sweepLoginFiles(cfg.LocalSocketDir)

@@ -93,6 +93,19 @@ export function useAgentOverview(interval = OVERVIEW_POLL): OverviewState {
   return useSyncExternalStore(subscribe, get)
 }
 
+export function setPaneOverview(pane: OverviewPane) {
+  const next = new Map(state.panes)
+  next.set(pane.paneId, pane)
+  state = { ...state, panes: next }
+  emit()
+}
+
+export function getOverviewPane(
+  paneId: string | undefined,
+): OverviewPane | undefined {
+  return paneId ? state.panes.get(paneId) : undefined
+}
+
 // Forgets what was read (tests).
 export function resetAgentOverview() {
   clearTimeout(timer)

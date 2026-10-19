@@ -1,5 +1,6 @@
+import { Star } from 'lucide-react'
 import { type FormEvent, useEffect, useId, useRef, useState } from 'react'
-import { RequestError } from '../hooks/use-mux-api'
+import { type FoldersData, RequestError } from '../hooks/use-mux-api'
 import { Button } from './ui/button'
 import { Sheet } from './ui/sheet'
 
@@ -34,9 +35,20 @@ export function groupProblem(code: string, noun: string): string {
   return messages[code] ?? `Could not create the ${noun}`
 }
 
+function folderBasename(dirPath: string): string {
+  return (
+    dirPath
+      .replace(/[\\/]+$/, '')
+      .split(/[\\/]/)
+      .pop() || ''
+  )
+}
+
 interface Props {
   // "workspace" (Herdr) or "tmux session"
   noun: string
+  // Optional favourite and recent directories from /api/mux/launchers
+  folders?: FoldersData
   onClose: () => void
   // Creates the group; a refusal throws RequestError with the server's code.
   // isOpen tells whether the box is still open once the reply is in: after
@@ -46,7 +58,7 @@ interface Props {
 
 // Asks for the name and directory of a new group and creates it. A refusal
 // is shown under the fields, which keep what was typed.
-export function GroupDialog({ noun, onClose, onCreate }: Props) {
+export function GroupDialog({ noun, folders, onClose, onCreate }: Props) {
   const [name, setName] = useState('')
   const [cwd, setCwd] = useState('')
   const [sending, setSending] = useState(false)
@@ -73,6 +85,17 @@ export function GroupDialog({ noun, onClose, onCreate }: Props) {
     const id = requestAnimationFrame(() => nameInput.current?.focus())
     return () => cancelAnimationFrame(id)
   }, [])
+
+  const pickFolder = (dirPath: string) => {
+    setCwd(dirPath)
+    if (!name.trim()) {
+      const base = folderBasename(dirPath)
+      if (base && !nameTooLong(base)) {
+        setName(base)
+      }
+    }
+    setProblem(undefined)
+  }
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
@@ -103,6 +126,12 @@ export function GroupDialog({ noun, onClose, onCreate }: Props) {
       if (!closed.current) setSending(false)
     }
   }
+
+  const favourites = folders?.favourites ?? []
+  const recent = (folders?.recents ?? folders?.recent ?? []).filter(
+    (f) => !favourites.includes(f),
+  )
+  const hasFolderChips = favourites.length > 0 || recent.length > 0
 
   const describedBy = problem ? errorId : undefined
   return (
@@ -146,6 +175,38 @@ export function GroupDialog({ noun, onClose, onCreate }: Props) {
           }}
           className={`${INPUT_CLASSES} font-term`}
         />
+        {hasFolderChips && (
+          <fieldset
+            className="flex flex-wrap gap-1.5 border-0 p-0"
+            aria-label="Suggested directories"
+          >
+            {favourites.map((dir) => (
+              <button
+                key={`fav:${dir}`}
+                type="button"
+                onClick={() => pickFolder(dir)}
+                className="inline-flex items-center gap-1 rounded-full border border-border bg-surface px-2.5 py-1 font-term text-xs text-fg-muted hover:border-border-strong hover:text-fg"
+              >
+                <Star
+                  size={11}
+                  aria-hidden="true"
+                  className="fill-warning text-warning"
+                />
+                <span>{dir}</span>
+              </button>
+            ))}
+            {recent.map((dir) => (
+              <button
+                key={`rec:${dir}`}
+                type="button"
+                onClick={() => pickFolder(dir)}
+                className="inline-flex items-center gap-1 rounded-full border border-border bg-surface px-2.5 py-1 font-term text-xs text-fg-muted hover:border-border-strong hover:text-fg"
+              >
+                <span>{dir}</span>
+              </button>
+            ))}
+          </fieldset>
+        )}
         {problem && (
           <div id={errorId} role="alert" className="text-sm text-danger">
             {problem}

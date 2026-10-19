@@ -22,11 +22,12 @@ import {
   type KeyboardEvent,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
 } from 'react'
 import { useGroupCollapsed } from '../hooks/use-group-collapsed'
-import { RequestError } from '../hooks/use-mux-api'
+import { type CrewMemberStatus, RequestError } from '../hooks/use-mux-api'
 import type { Session, SessionGroup } from '../types/session'
 import { dropIndex, movableGroups, targetIndex } from '../utils/reorder'
 import {
@@ -72,6 +73,8 @@ interface Props {
   sessions: Session[]
   // Groups the sessions belong to; headers show only when there are several.
   groups?: SessionGroup[]
+  // Multi-machine crew members when operating in crew federation mode.
+  crewMembers?: readonly CrewMemberStatus[]
   activeId: string
   onSelect: (id: string) => void
   // Unset (view-only role): no way to add or close a tab is shown.
@@ -208,6 +211,7 @@ function renameProblem(err: unknown, noun: string): string {
 export function SessionSidebar({
   sessions,
   groups = [],
+  crewMembers,
   activeId,
   onSelect,
   onAdd,
@@ -257,11 +261,60 @@ export function SessionSidebar({
   const editingSession = sessions.find((s) => keyOf(s) === editingKey)
   const editingId = editingSession?.id ?? null
 
+  const [machineFilter, setMachineFilter] = useState<string>('all')
+  const machineChips = useMemo<CrewMemberStatus[]>(() => {
+    const seen = new Map<string, CrewMemberStatus>()
+    for (const g of groups) {
+      if (!g.machineId) continue
+      if (!seen.has(g.machineId)) {
+        seen.set(g.machineId, {
+          id: g.machineId,
+          name: g.machineName || g.machineId,
+          role: g.machineId === 'local' ? 'lead' : 'member',
+          status: 'online',
+          latencyMs: 0,
+        })
+      }
+    }
+    if (crewMembers && crewMembers.length > 0) {
+      for (const m of crewMembers) {
+        seen.set(m.id, m)
+      }
+      return [...seen.values()]
+    }
+    return seen.size > 1 ? [...seen.values()] : []
+  }, [crewMembers, groups])
+  const isMultiMachine = machineChips.length > 0
+  const groupById = useMemo(
+    () => new Map(groups.map((g) => [g.id, g])),
+    [groups],
+  )
+  const groupMatchesMachine = (group: SessionGroup) => {
+    if (!isMultiMachine || machineFilter === 'all') return true
+    if (group.machineId) return group.machineId === machineFilter
+    if (machineFilter === 'local') return !group.id.startsWith('c:')
+    return group.id.startsWith(`c:${machineFilter}/`)
+  }
+  const sessionMatchesMachine = (s: Session) => {
+    if (!isMultiMachine || machineFilter === 'all') return true
+    const group = s.groupId ? groupById.get(s.groupId) : undefined
+    if (group) return groupMatchesMachine(group)
+    if (machineFilter === 'local') return !s.id.startsWith('c:')
+    return s.id.startsWith(`c:${machineFilter}/`)
+  }
+  const filteredGroups = isMultiMachine
+    ? groups.filter(groupMatchesMachine)
+    : groups
+  const machineSessions = isMultiMachine
+    ? sessions.filter(sessionMatchesMachine)
+    : sessions
+
   // A filter applies only with the bar that can clear it.
   const activeFilter = onFilterChange
-    ? effectiveFilter(sessions, filter)
+    ? effectiveFilter(machineSessions, filter)
     : 'all'
-  const filtering = activeFilter !== 'all'
+  const filtering =
+    activeFilter !== 'all' || (isMultiMachine && machineFilter !== 'all')
   // The search box: opened from its magnifier, never saved; a phone's sheet
   // closing clears it.
   const [searchOpen, setSearchOpen] = useState(false)
@@ -283,8 +336,7 @@ export function SessionSidebar({
     setQuery('')
     setSearchOpen(false)
   }
-  const groupById = new Map(groups.map((g) => [g.id, g]))
-  const summary = summarizeSessions(sessions)
+  const summary = summarizeSessions(machineSessions)
   // Hidden with no agent anywhere: there is nothing to filter by.
   const showFilterBar = !!onFilterChange && summary.agents > 0
   // The row being edited stays even when it stops matching, so a poll does
@@ -293,12 +345,13 @@ export function SessionSidebar({
     const matching = list.filter(
       (s) =>
         s.id === editingId ||
-        (matchesFilter(s, activeFilter) &&
+        (sessionMatchesMachine(s) &&
+          matchesFilter(s, activeFilter) &&
           matchesQuery(s, terms, groupById.get(s.groupId ?? ''))),
     )
     return sortBlockedFirst ? blockedFirst(matching) : matching
   }
-  const visibleSessions = arrange(sessions)
+  const visibleSessions = arrange(machineSessions)
   const activeSession = sessions.find((s) => s.id === activeId)
 
   // Reordering works on the list in the server's order: hidden while the
@@ -868,6 +921,14 @@ export function SessionSidebar({
                   the list into a horizontal scroll past a long name */}
               <span className="relative min-w-0 flex-1 truncate text-left">
                 {name}
+                {isMultiMachine && group.machineName && (
+                  <span
+                    data-testid="group-machine-badge"
+                    className="ml-1.5 rounded-control border border-border px-1 normal-case tracking-normal text-[10px] text-fg-muted"
+                  >
+                    {group.machineName}
+                  </span>
+                )}
                 {group.worktree?.branch && (
                   <span
                     title={group.worktree.branch}
@@ -953,7 +1014,9 @@ export function SessionSidebar({
 
   // The rows in the order on screen: by group when there are headers
   const shownSessions = showGroups
-    ? groups.flatMap((g) => arrange(sessions.filter((s) => s.groupId === g.id)))
+    ? filteredGroups.flatMap((g) =>
+        arrange(sessions.filter((s) => s.groupId === g.id)),
+      )
     : visibleSessions
 
   const searchToggle = canSearch && (
@@ -991,6 +1054,49 @@ export function SessionSidebar({
     />
   )
 
+  const machineFilterBar = isMultiMachine && (
+    <fieldset
+      aria-label="Filter by machine"
+      className="flex flex-wrap items-center gap-1"
+    >
+      <button
+        type="button"
+        data-testid="sidebar-machine-chip-all"
+        aria-pressed={machineFilter === 'all'}
+        onClick={() => setMachineFilter('all')}
+        className={`inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[11px] font-medium transition-colors ${FOCUS_RING} ${
+          machineFilter === 'all'
+            ? 'border-accent bg-accent-soft text-fg'
+            : 'border-border bg-bg text-fg-muted hover:bg-surface-raised hover:text-fg'
+        }`}
+      >
+        All machines
+      </button>
+      {machineChips.map((m) => (
+        <button
+          key={m.id}
+          type="button"
+          data-testid={`sidebar-machine-chip-${m.id}`}
+          aria-pressed={machineFilter === m.id}
+          onClick={() => setMachineFilter(m.id)}
+          className={`inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[11px] font-medium transition-colors ${FOCUS_RING} ${
+            machineFilter === m.id
+              ? 'border-accent bg-accent-soft text-fg'
+              : 'border-border bg-bg text-fg-muted hover:bg-surface-raised hover:text-fg'
+          }`}
+        >
+          <span
+            aria-hidden="true"
+            className={`size-1.5 rounded-full ${
+              m.status === 'online' ? 'bg-success' : 'bg-fg-subtle'
+            }`}
+          />
+          <span className="max-w-24 truncate">{m.name}</span>
+        </button>
+      ))}
+    </fieldset>
+  )
+
   // Session list content (shared between mobile and desktop)
   const sessionList =
     narrowed && visibleSessions.length === 0 ? (
@@ -1000,6 +1106,7 @@ export function SessionSidebar({
           size="sm"
           onClick={() => {
             onFilterChange?.('all')
+            setMachineFilter('all')
             setQuery('')
           }}
         >
@@ -1007,7 +1114,7 @@ export function SessionSidebar({
         </Button>
       </div>
     ) : showGroups ? (
-      groups.map(renderGroup)
+      filteredGroups.map(renderGroup)
     ) : (
       <div
         className={`flex flex-col ${rowGap} ui-native:overflow-hidden ui-native:rounded-panel`}
@@ -1089,6 +1196,8 @@ export function SessionSidebar({
           {showAddForm && addForm}
           {newGroupButton}
           {searchField}
+          {machineFilterBar}
+          {filterBar}
           {sessionList}
         </div>
       </Sheet>
@@ -1097,6 +1206,12 @@ export function SessionSidebar({
 
   // Desktop: collapsible sidebar
   if (isCollapsed) {
+    // Sorted within each group, as in the expanded list.
+    const railSessions = showGroups
+      ? filteredGroups.flatMap((g) =>
+          arrange(sessions.filter((s) => s.groupId === g.id)),
+        )
+      : visibleSessions
     return (
       <aside className={`w-14 ${SIDEBAR_BASE_CLASSES}`}>
         <div
@@ -1203,6 +1318,7 @@ export function SessionSidebar({
               )}
           {newGroupButton && <div className="mt-2">{newGroupButton}</div>}
           {searchField && <div className="mt-2">{searchField}</div>}
+          {machineFilterBar && <div className="mt-2">{machineFilterBar}</div>}
           {filterBar && <div className="mt-2">{filterBar}</div>}
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">

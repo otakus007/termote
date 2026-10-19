@@ -1,4 +1,10 @@
-import { ChevronDown, GitBranch, Hourglass, SquareTerminal } from 'lucide-react'
+import {
+  ChevronDown,
+  GitBranch,
+  Hourglass,
+  Pin,
+  SquareTerminal,
+} from 'lucide-react'
 import { memo, type Ref, useId, useState } from 'react'
 import { agentLabel } from '../chat-agents'
 import type {
@@ -12,9 +18,10 @@ import { formatAgo } from '../utils/format-ago'
 import { visibleUnsafe } from '../utils/unsafe-chars'
 import { percentLabel, usageLevel } from '../utils/usage-format'
 import { AgentStatusBadge } from './agent-status-badge'
+import { CacheChip } from './cache-chip'
 import { StatusTimeline } from './status-timeline'
 import { SubagentTree, subagentSummary } from './subagent-tree'
-import { FOCUS_RING, IconButton } from './ui/button'
+import { Button, FOCUS_RING, IconButton } from './ui/button'
 import { UsageMeter } from './usage-meter'
 
 const STATUS_WORDS: Record<AgentStatus, string> = {
@@ -100,6 +107,8 @@ interface Props {
   groupTitle?: string
   // The group is a worktree of a Herdr worktree group
   worktree?: boolean
+  // Multi-machine host badge when operating in crew mode
+  machineName?: string
   // What /api/mux/overview read for the pane, once read
   overview?: OverviewPane
   // The overview could not be read: no placeholder waits for it
@@ -124,6 +133,9 @@ interface Props {
   // border until focus leaves it
   openRef?: Ref<HTMLButtonElement>
   highlighted?: boolean
+  onAck?: (paneId: string) => void
+  pinned?: boolean
+  onTogglePin?: (paneKey: string) => void
 }
 
 // One agent of the overview: its status and how long it has been in it,
@@ -135,6 +147,7 @@ export const AgentCard = memo(function AgentCard({
   where,
   groupTitle,
   worktree,
+  machineName,
   overview,
   overviewFailed,
   now,
@@ -145,6 +158,9 @@ export const AgentCard = memo(function AgentCard({
   onOpen,
   openRef,
   highlighted,
+  onAck,
+  pinned,
+  onTogglePin,
 }: Props) {
   const detailsId = useId()
   const moreId = useId()
@@ -162,11 +178,13 @@ export const AgentCard = memo(function AgentCard({
   const pending = (what: string) => overview?.unavailable?.includes(what)
   const showChanges =
     overview && !pending('changes') && overview.changed !== undefined
+  const hostBadge = machineName ?? overview?.machineName
   return (
     <div
       data-status={status}
       data-stuck={stuckFor !== undefined || undefined}
       data-highlighted={highlighted || undefined}
+      data-pinned={pinned || undefined}
       className={`relative rounded-panel border bg-surface ui-terminal:bg-bg ${
         highlighted
           ? 'border-accent ring-1 ring-accent'
@@ -183,7 +201,7 @@ export const AgentCard = memo(function AgentCard({
         onClick={() => onOpen(session, pane, opensChat ? 'chat' : 'terminal')}
         aria-label={`${openLabel}: ${name}, ${status ? STATUS_WORDS[status] : 'status unknown'}, ${where}`}
         aria-describedby={detailsId}
-        className={`flex w-full min-h-touch flex-col gap-1.5 rounded-panel p-3 pr-12 text-left transition-colors duration-(--duration-fast) ease-standard hover:bg-surface-raised ${FOCUS_RING}`}
+        className={`flex w-full min-h-touch flex-col gap-1.5 rounded-panel p-3 pr-20 text-left transition-colors duration-(--duration-fast) ease-standard hover:bg-surface-raised ${FOCUS_RING}`}
       >
         <span className="flex min-w-0 items-center gap-1.5 text-[13px]">
           <AgentStatusBadge status={status} />
@@ -210,6 +228,14 @@ export const AgentCard = memo(function AgentCard({
           <span className="truncate" title={groupTitle}>
             {where}
           </span>
+          {hostBadge && (
+            <span
+              data-testid="agent-machine-badge"
+              className="shrink-0 rounded-control border border-border px-1 text-[11px]"
+            >
+              {hostBadge}
+            </span>
+          )}
           {worktree && (
             <span className="shrink-0 rounded-control border border-border px-1 text-[11px]">
               worktree
@@ -236,7 +262,7 @@ export const AgentCard = memo(function AgentCard({
               />
             )
           )}
-          {(showChanges || overview?.usage) && (
+          {(showChanges || overview?.usage || overview?.cache) && (
             <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-fg-muted">
               {showChanges && (
                 <span className="flex min-w-0 items-center gap-1">
@@ -257,6 +283,7 @@ export const AgentCard = memo(function AgentCard({
                 </span>
               )}
               {overview?.usage && <ContextUsage usage={overview.usage} />}
+              {overview?.cache && <CacheChip cache={overview.cache} />}
             </span>
           )}
         </span>
@@ -292,16 +319,42 @@ export const AgentCard = memo(function AgentCard({
           </div>
         )}
       </div>
-      {opensChat && (
-        <IconButton
-          size="sm"
-          onClick={() => onOpen(session, pane, 'terminal')}
-          aria-label={`Open terminal: ${name}, ${where}`}
-          title="Open terminal"
-          className="absolute right-2 top-2"
-        >
-          <SquareTerminal size={16} aria-hidden="true" />
-        </IconButton>
+      {(opensChat || (status === 'done' && onAck) || onTogglePin) && (
+        <div className="absolute right-2 top-2 flex items-center gap-1">
+          {status === 'done' && onAck && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => onAck(pane.id)}
+              aria-label={`Acknowledge ${name}, ${where}`}
+              title="Acknowledge done status"
+            >
+              Ack
+            </Button>
+          )}
+          {onTogglePin && (
+            <IconButton
+              size="sm"
+              onClick={() => onTogglePin(paneKey)}
+              aria-label={`${pinned ? 'Unpin' : 'Pin'} ${name}, ${where}`}
+              aria-pressed={Boolean(pinned)}
+              title={pinned ? 'Unpin pane' : 'Pin pane to top'}
+              className={pinned ? 'text-accent' : undefined}
+            >
+              <Pin size={15} aria-hidden="true" />
+            </IconButton>
+          )}
+          {opensChat && (
+            <IconButton
+              size="sm"
+              onClick={() => onOpen(session, pane, 'terminal')}
+              aria-label={`Open terminal: ${name}, ${where}`}
+              title="Open terminal"
+            >
+              <SquareTerminal size={16} aria-hidden="true" />
+            </IconButton>
+          )}
+        </div>
       )}
     </div>
   )

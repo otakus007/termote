@@ -13,11 +13,11 @@ export const APP_INFO = {
     name: 'Lam Ngoc Khuong',
     url: 'https://khuong.dev',
   },
-  repository: 'https://github.com/lamngockhuong/termote',
+  repository: 'https://github.com/otakus007/termote',
   license: 'MIT',
   links: {
-    changelog: 'https://github.com/lamngockhuong/termote/releases',
-    issues: 'https://github.com/lamngockhuong/termote/issues',
+    changelog: 'https://github.com/otakus007/termote/releases',
+    issues: 'https://github.com/otakus007/termote/issues',
   },
   sponsor: {
     momo: 'https://me.momo.vn/khuong',
